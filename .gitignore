@@ -1,0 +1,6 @@
+.DS_Store
+*.test
+*.out
+*.prof
+default.pgo
+node_modules/
