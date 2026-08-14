@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "go-turbo",
+  "description": "Go performance engineering for AI agents. Fast is a property you measure, not a style you adopt.",
+  "owner": {
+    "name": "Hendrik Nielaender",
+    "url": "https://github.com/hendriknielaender"
+  },
+  "plugins": [
+    {
+      "name": "go-turbo",
+      "description": "Writes and reviews Go like a staff performance engineer. Allocation-aware idiomatic Go by default; paid optimizations only where a measurement justifies them.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}
