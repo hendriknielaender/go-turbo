@@ -36,7 +36,6 @@ measurement justifies them, and always labeled.
 |-------|------|
 | Claude Code, Codex, Amp, and other `AGENTS.md` readers | `AGENTS.md` |
 | Cursor | `.cursor/rules/go-turbo.mdc` |
-| Windsurf | `.windsurf/rules/go-turbo.md` |
 
 Or drop `skills/` into any agent that loads Anthropic-style skills.
 
@@ -162,7 +161,6 @@ go-turbo/
 │   └── go-turbo-help/
 ├── .claude-plugin/                 plugin + marketplace manifests
 ├── .cursor/rules/
-└── .windsurf/rules/
 ```
 
 ## Contributing
