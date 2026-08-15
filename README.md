@@ -1,6 +1,7 @@
 <h1 align="center">go-turbo</h1>
 
 <p align="center">
+  <img alt="go-turbo logo" src="assets/go-turbo.png" height="150" /><br>
   <em>Evidence-driven Go performance engineering for coding agents.</em><br>
 </p>
 
