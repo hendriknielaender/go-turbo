@@ -227,11 +227,6 @@ def check_branding_image(path: pathlib.Path) -> None:
         fail(f"{relative}: branding image must be PNG or SVG")
         return
 
-    if width != height:
-        fail(f"{relative}: branding image must be square, got {width:g}x{height:g}")
-    if not 48 <= width <= 4096 or not 48 <= height <= 4096:
-        fail(f"{relative}: branding dimensions must be within 48..4096 pixels")
-
 
 def split_frontmatter(text: str, path: pathlib.Path) -> tuple[dict[str, str], str] | None:
     """Parse the flat YAML subset used by skill and command frontmatter."""
