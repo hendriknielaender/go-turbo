@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo Improve"
+  short_description: "Apply and verify a measured Go performance fix"
+  default_prompt: "Use $go-turbo-improve to apply and verify the measured performance fix for this Go code."
+policy:
+  allow_implicit_invocation: false

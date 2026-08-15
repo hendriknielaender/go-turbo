@@ -1,0 +1,20 @@
+{
+  "name": "go-turbo",
+  "interface": {
+    "displayName": "Go Turbo"
+  },
+  "plugins": [
+    {
+      "name": "go-turbo",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

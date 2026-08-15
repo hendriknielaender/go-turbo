@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo"
+  short_description: "Write and tune evidence-backed idiomatic Go"
+  default_prompt: "Use $go-turbo to implement or review this Go task with performance-aware, idiomatic choices."
+policy:
+  allow_implicit_invocation: true

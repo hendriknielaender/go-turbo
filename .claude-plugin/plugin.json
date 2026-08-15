@@ -1,0 +1,34 @@
+{
+  "name": "go-turbo",
+  "version": "0.0.0",
+  "description": "Go performance mode. Writes and reviews Go like a staff performance engineer: idiomatic first, allocation-aware always, micro-optimized only where a measurement says it matters.",
+  "author": {
+    "name": "Hendrik Nielaender",
+    "url": "https://github.com/hendriknielaender"
+  },
+  "homepage": "https://github.com/hendriknielaender/go-turbo",
+  "repository": "https://github.com/hendriknielaender/go-turbo",
+  "license": "MIT",
+  "keywords": [
+    "go",
+    "golang",
+    "performance",
+    "optimization",
+    "profiling",
+    "benchmarking",
+    "pprof",
+    "escape-analysis",
+    "gc",
+    "concurrency"
+  ],
+  "skills": [
+    "./skills/go-turbo",
+    "./skills/go-turbo-analyze",
+    "./skills/go-turbo-audit",
+    "./skills/go-turbo-bench",
+    "./skills/go-turbo-escape",
+    "./skills/go-turbo-help",
+    "./skills/go-turbo-improve",
+    "./skills/go-turbo-review"
+  ]
+}

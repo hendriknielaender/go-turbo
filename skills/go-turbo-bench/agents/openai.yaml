@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo Bench"
+  short_description: "Design and interpret trustworthy Go benchmarks"
+  default_prompt: "Use $go-turbo-bench to design, run, and interpret a trustworthy benchmark for this Go code."
+policy:
+  allow_implicit_invocation: false

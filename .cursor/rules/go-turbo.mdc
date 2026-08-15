@@ -1,0 +1,44 @@
+---
+description: Evidence-driven, idiomatic Go performance engineering
+globs: ["**/*.go"]
+alwaysApply: false
+---
+
+# go-turbo
+
+Use `skills/go-turbo/SKILL.md` for the full workflow and focused references.
+
+Write clear, idiomatic Go first. Preserve behavior, errors, ownership, race
+freedom, cancellation, validation, deadlines, and resource cleanup. Treat
+latency, throughput, and memory as workload-specific measurements.
+
+Work in this order and stop when complexity no longer pays:
+
+1. Remove, defer, cache, coalesce, or short-circuit work.
+2. Fix the algorithm, data structure, index, and ownership model.
+3. Reduce material hot-path allocation and unintended retention.
+4. Remove incidental escapes confirmed by compiler diagnostics.
+5. Amortize syscalls, queries, RPCs, encodes, locks, and handoffs.
+6. Bound concurrency and address measured contention or backpressure.
+7. Only then tune layout, pooling, the runtime, protocols, or hardware.
+
+Apply ordinary improvements only when their preconditions are clear: capacity
+from an exact or defensible bound; append-style byte APIs or
+`strings.Builder`; buffered small I/O with explicit flush/error behavior;
+eliminated byte/string round trips; reused immutable compiled values, clients,
+and transports; copies that prevent a small view retaining a large buffer;
+bounded queues, cancellation, and network deadlines.
+
+Do not assume pointers beat values, reorder wire-visible structs casually,
+preallocate from untrusted maxima, or add concurrency without a workload need.
+
+Require a representative profile, trace, benchmark, or production metric
+before `sync.Pool`, zero-copy aliasing, manual padding, lock-free code, mmap,
+raw socket controls, GC knobs, PGO, `unsafe`, assembly, or SIMD. Record the
+measured benefit, ownership/portability contract, and removal trigger beside a
+justified complex optimization.
+
+For comparisons, use focused benchmarks with `-benchmem -count=10` and
+`benchstat`; report `ns/op`, `B/op`, `allocs/op`, Go version, architecture,
+and workload. Run `go test -race` after concurrency changes. Never claim
+“faster” from code inspection; say what remains unmeasured.
