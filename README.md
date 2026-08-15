@@ -2,7 +2,6 @@
 
 <p align="center">
   <em>Evidence-driven Go performance engineering for coding agents.</em><br>
-  <strong>Fast is a property you measure, not a style you adopt.</strong>
 </p>
 
 ---
