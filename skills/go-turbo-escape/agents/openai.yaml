@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo Escape"
+  short_description: "Explain and reduce relevant Go heap escapes"
+  default_prompt: "Use $go-turbo-escape to diagnose the relevant heap escapes in this Go code."
+policy:
+  allow_implicit_invocation: false

@@ -1,222 +1,368 @@
 # Escape Analysis
 
-Escape analysis is the compiler pass that decides whether a value lives on
-the stack or the heap. A stack value is freed for nothing when the function
-returns; a heap value costs an allocation and then GC work forever after.
-
-The compiler is conservative by necessity: if it cannot prove a value stops
-being referenced when the function returns, the value escapes. Most escapes
-are correct and necessary. The ones worth fixing are the ones caused by
-incidental code shape rather than actual lifetime requirements.
+Escape analysis decides whether storage may remain in a stack frame or must
+survive elsewhere. Stack placement removes heap allocation and GC work, but it
+is not a goal by itself: stacks consume memory, grow by copying, and can make
+large or recursive frames expensive. Fix incidental escapes only where a
+representative measurement says they matter.
 
 ## Contents
 
-- [Reading the diagnostics](#reading-the-diagnostics)
-- [What forces a heap allocation](#what-forces-a-heap-allocation)
-- [Restructuring to avoid escape](#restructuring-to-avoid-escape)
-- [When escaping is the right answer](#when-escaping-is-the-right-answer)
-- [Inlining and its interaction with escape](#inlining-and-its-interaction-with-escape)
+- [Read the compiler's decision](#read-the-compilers-decision)
+- [Reason about lifetime, not syntax](#reason-about-lifetime-not-syntax)
+- [Recognize common escape paths](#recognize-common-escape-paths)
+- [Account for Go 1.26 slice placement](#account-for-go-126-slice-placement)
+- [Give callers control of reusable storage](#give-callers-control-of-reusable-storage)
+- [Prefer values when values express the semantics](#prefer-values-when-values-express-the-semantics)
+- [Use bounded stack scratch deliberately](#use-bounded-stack-scratch-deliberately)
+- [Reuse storage without violating ownership](#reuse-storage-without-violating-ownership)
+- [Keep hot dispatch visible when evidence supports it](#keep-hot-dispatch-visible-when-evidence-supports-it)
+- [Treat inlining and escape analysis as coupled evidence](#treat-inlining-and-escape-analysis-as-coupled-evidence)
+- [Leave necessary escapes alone](#leave-necessary-escapes-alone)
+- [Verify the shipped build](#verify-the-shipped-build)
 
-## Reading the diagnostics
+## Read the compiler's decision
+
+Inspect the package first; inspect dependencies only when a boundary remains
+unexplained:
 
 ```sh
-go build -gcflags=-m ./...          # escape + inlining decisions
-go build -gcflags='-m -m' ./...     # with the reasoning chain
-go build -gcflags='-m' ./pkg 2>&1 | grep -E 'escapes to heap|moved to heap'
+go build -gcflags='-m=2' ./path/to/pkg
+go test -c -gcflags='-m=2' ./path/to/pkg
+go build -gcflags='all=-m=2' ./path/to/pkg
 ```
 
-The lines that cost you allocations:
+The verbose form prints inlining decisions and the data-flow reason for an
+escape. Useful messages include:
 
+```text
+moved to heap: x
+&T{...} escapes to heap
+parameter p leaks to ~r0
+argument does not escape
+inlining call to f
 ```
-./main.go:12:2:  moved to heap: buf
-./main.go:20:13: ... argument does not escape
-./main.go:24:16: &User{...} escapes to heap
-./main.go:31:6:  can inline process
-./main.go:33:9:  inlining call to process
-```
 
-- `moved to heap: x` — a declared variable that must outlive its frame.
-- `escapes to heap` — an expression whose result is heap-allocated.
-- `does not escape` — good news; the value stayed on the stack.
-- `can inline` / `inlining call to` — inlining decisions, which feed back
-  into escape analysis (see below).
+`leaks to` describes a relationship between a parameter and a result or
+stored location; it does not prove that every call allocates. Likewise, `does
+not escape` says nothing about allocations performed elsewhere in the
+function. Trace the reasoning chain to the value reported by `allocs/op` or an
+allocation profile.
 
-Two practical notes. First, `-gcflags=-m` on its own applies to the packages
-you name; use `-gcflags=all=-m` to see dependencies too, though the output
-gets large. Second, escape analysis output is *not* a benchmark. It tells you
-where allocations come from. Whether they matter is a separate question that
-a profile answers.
+Compiler diagnostics are not a stable API. Wording and placement decisions
+can change with Go version, architecture, build tags, instrumentation, PGO,
+and surrounding code.
 
-## What forces a heap allocation
+**Use when:** a profile or benchmark identifies a hot allocation and its
+source is unclear. **Backfires when:** teams treat every diagnostic as a bug,
+or tests assert exact diagnostic text and break on harmless compiler changes.
 
-**Returning a pointer to a local.**
+## Reason about lifetime, not syntax
+
+Taking an address, calling `new`, using a pointer receiver, or converting to
+an interface does not inherently allocate. Storage moves to the heap when the
+compiler cannot prove that all references die within a safe stack lifetime.
+
+Returning a pointer requires the object to outlive an out-of-line call:
 
 ```go
-func New() *Config {
-    c := Config{}
-    return &c        // moved to heap: c
+func newConfig() *Config {
+	return &Config{}
 }
 ```
 
-Correct and idiomatic — a constructor has to do this. Listed because it will
-dominate your `-m` output and you should recognize it as noise.
+That constructor is correct. If it is inlined and the caller does not retain
+the result, the compiler may still place the object on the caller's stack.
+Judge the call site and shipped binary, not the token `&`.
 
-**Storing into something that outlives the frame** — a global, a struct field
-reachable from outside, a slice element that escapes, a channel send:
+The compiler also records escape summaries for non-inlined functions. A
+pointer argument does not automatically escape merely because the call stayed
+out of line.
+
+## Recognize common escape paths
+
+### Store a pointer in longer-lived state
+
+Globals, returned objects, heap-resident fields, channels, and asynchronous
+work often extend a pointee's lifetime:
 
 ```go
-var cache *Entry
+var current *Entry
 
-func set() {
-    e := Entry{}
-    cache = &e       // moved to heap: e
+func publish() {
+	e := Entry{}
+	current = &e
 }
 ```
 
-**Closures that capture by reference.** A captured variable escapes if the
-closure outlives the frame:
+This escape is required by the program's semantics. Remove it only by changing
+ownership or lifetime, not by obscuring the pointer from the compiler.
+
+### Capture data in work that outlives the call
+
+Returned closures and goroutines commonly retain captured variables:
 
 ```go
 func counter() func() int {
-    n := 0
-    return func() int { n++; return n }  // moved to heap: n
+	n := 0
+	return func() int {
+		n++
+		return n
+	}
 }
 ```
 
-A closure that does *not* outlive the frame — passed to `sync.Once.Do`, to a
-`range` callback, to `sort.Slice` — generally does not force an escape.
+An immediately invoked closure can remain stack-local. Prefer passing
+goroutine inputs as explicit parameters when that clarifies ownership, but do
+not expect the rewrite alone to remove an escape; asynchronous lifetime still
+requires reachable storage.
 
-**Interface conversion where the compiler can't see through the call.** The
-classic offender is variadic `any`:
+### Retain an iteration variable's address
+
+With Go 1.22 or newer language semantics, a range variable declared by the
+loop is distinct on each iteration. Retaining `&value` is therefore correct,
+but it retains a per-iteration copy and can create one heap object per item.
+When callers need identity with the source slice, address the element:
 
 ```go
-fmt.Fprintf(w, "id=%d", id)   // id escapes: boxed into any
+func itemPointers(items []Item) []*Item {
+	result := make([]*Item, 0, len(items))
+	for i := range items {
+		result = append(result, &items[i])
+	}
+	return result
+}
 ```
 
-`fmt` verbs take `...any`, so every argument is boxed. That's fine in
-error paths and startup; it's an allocation per call in a hot loop. In a hot
-path, use `strconv.AppendInt` into a reused buffer, or `w.WriteString`.
+This form can keep the complete source backing array live and exposes its
+elements to mutation. Use values instead when identity is unnecessary. Check
+the module's language version when reviewing code that may retain range
+variables; older semantics differ.
 
-**Values whose size isn't known at compile time.** `make([]byte, n)` with a
-runtime `n` historically escaped; Go 1.26 stack-allocates the backing store
-in more cases, but a large or unbounded `n` still goes to the heap. There is
-a stack-frame size limit — very large fixed-size arrays escape too.
+### Hide lifetime behind dynamic behavior
 
-**Anything reachable from an escaped value.** Escape is transitive: if a
-struct escapes, so does everything its pointer fields point at.
+Interface calls, function values, reflection, and `...any` can reduce the
+compiler's knowledge of the callee. The interface conversion itself allocates
+only if its concrete data escapes. Formatting APIs may also allocate their own
+buffers, so attribute the cost before replacing them.
 
-**Taking the address of a loop variable and storing it.** Since Go 1.22 each
-iteration has its own variable, so this is now correct — but it is n
-allocations, one per iteration.
-
-## Restructuring to avoid escape
-
-**Pass a destination instead of returning a new one.** This is the highest-
-value refactor in the list and it reads fine:
+For a measured integer-formatting loop, an append-style path can keep storage
+with the caller:
 
 ```go
-// Allocates per call.
-func Format(v Value) []byte
-
-// Caller controls the memory; often no allocation at all.
-func AppendFormat(dst []byte, v Value) []byte
+func appendID(dst []byte, id int64) []byte {
+	dst = append(dst, "id="...)
+	return strconv.AppendInt(dst, id, 10)
+}
 ```
 
-The standard library uses this shape everywhere — `strconv.AppendInt`,
-`time.Time.AppendFormat`, `append`-style APIs generally. Callers reuse one
-buffer across a whole loop.
+This backfires on cold error and logging paths where `fmt` is clearer and its
+cost is irrelevant.
 
-**Return values, not pointers, for small structs.** A 16- or 32-byte struct
-returned by value copies a few words and stays on the stack. Returned by
-pointer, it allocates and adds an indirection on every field access. Pointers
-earn their keep for large structs, for mutation, and when nil is meaningful —
-not by default.
+### Exceed a stack-placement constraint
 
-**Give the compiler a fixed size when you can.**
+The compiler may reject a stack candidate because its size is large,
+unbounded, or unsuitable for a frame. These are implementation constraints,
+not language constants. Avoid documenting or coding against an exact byte or
+inlining budget.
+
+Shrinking an object can help only when the profile attributes cost to that
+object. Splitting it into pointers may reduce a copy while adding allocations,
+indirections, and GC scan work.
+
+## Account for Go 1.26 slice placement
+
+Go 1.26 can stack-place more non-escaping slice backing stores even when the
+requested length or capacity is not a source-level constant. The compiler can
+generate a bounded stack-backed path and a heap fallback for larger runtime
+sizes. It can also recover constants through local data flow.
+
+Do not assume that this allocates:
 
 ```go
-var scratch [64]byte
-b := scratch[:0]           // stack-backed, no allocation
-b = strconv.AppendInt(b, n, 10)
+func checksum(n int) byte {
+	b := make([]byte, n)
+	fill(b)
+	return fold(b)
+}
 ```
 
-A useful pattern for small, bounded work: a fixed array in the frame, sliced
-to zero length, appended into. It stays on the stack as long as `b` doesn't
-escape.
+Inspect `-m=2` and `allocs/op` for the exact call distribution. If `n` is
+usually above the compiler's internal bound, the heap fallback remains. If
+the slice escapes through `fill` or `fold`, stack placement is unavailable.
 
-**Keep the concrete type at hot boundaries.** Accepting `io.Writer` is right
-almost everywhere; accepting `*bufio.Writer` in one internal hot function
-lets the compiler inline the call and skip the boxing.
+**Use the compiler-provided path when:** the slice is local and bounded in
+practice. **Backfires when:** code adds a second manual scratch array based on
+an assumed compiler threshold, inflating frames while preserving the fallback
+allocation. Compiler thresholds are deliberately not contractual.
 
-**Hoist the allocation out of the loop.**
+## Give callers control of reusable storage
+
+Append into caller-owned capacity instead of returning a fresh buffer from a
+hot operation:
 
 ```go
+func AppendRecord(dst []byte, r Record) []byte {
+	dst = append(dst, r.Kind...)
+	dst = append(dst, ':')
+	return strconv.AppendInt(dst, r.Count, 10)
+}
+```
+
+The caller can keep one buffer across a loop and the callee can remain
+allocation-free until capacity grows.
+
+**Use when:** the API is internal or append semantics are natural and callers
+already batch work. **Backfires when:** a caller assumes the result is
+independent, retains multiple returned views, or threading scratch state
+through many layers damages the API for a cold-path allocation.
+
+Document whether the result aliases `dst`. If independent results are needed,
+clone at the ownership boundary.
+
+## Prefer values when values express the semantics
+
+Return and pass small immutable structs by value unless mutation, identity, or
+nil has meaning:
+
+```go
+func parseHeader(src []byte) (Header, error) {
+	var h Header
+	if err := decodeHeader(&h, src); err != nil {
+		return Header{}, err
+	}
+	return h, nil
+}
+```
+
+Registers and stack copies often make this cheaper than allocating a separate
+object and chasing a pointer. The compiler may remove copies entirely.
+
+**Use when:** the type is modest, copy semantics are correct, and benchmarks
+show pointer construction or GC pressure. **Backfires when:** the struct is
+large or copied frequently, contains synchronization primitives that must not
+be copied, requires stable identity, or value semantics obscure mutation.
+
+## Use bounded stack scratch deliberately
+
+For a small protocol maximum, use a local array and slice it:
+
+```go
+func appendNumber(dst []byte, n int64) []byte {
+	var scratch [32]byte
+	tmp := strconv.AppendInt(scratch[:0], n, 10)
+	return append(dst, tmp...)
+}
+```
+
+The returned `dst` owns the copied bytes; the local scratch does not escape.
+Prefer this shape only when the bound is inherent and the compiler is not
+already producing an equivalent stack path.
+
+**Use when:** a fixed small maximum is part of the format and a benchmark
+removes a hot allocation. **Backfires when:** large arrays increase stack
+growth and copying, recursion multiplies frame cost, the bound is guessed, or
+the resulting slice escapes and moves the array to the heap anyway.
+
+## Reuse storage without violating ownership
+
+Hoist a scratch buffer out of a loop and reset its length:
+
+```go
+buf := make([]byte, 0, 256)
 for _, item := range items {
-    buf := make([]byte, 0, 64)     // n allocations
-    process(append(buf, item...))
-}
-
-buf := make([]byte, 0, 64)         // one
-for _, item := range items {
-    buf = buf[:0]
-    process(append(buf, item...))
+	buf = buf[:0]
+	buf = encodeItem(buf, item)
+	consumeNow(buf)
 }
 ```
 
-## When escaping is the right answer
+This is valid only when `consumeNow` finishes with the bytes before the next
+iteration. If it stores, queues, or launches work with the slice, clone before
+reuse. Reuse can otherwise produce silent data corruption as well as a race.
 
-Do not contort code to defeat escape analysis. Escape is correct and should
-be left alone when:
+**Use when:** processing is synchronous and size is stable. **Backfires when:**
+capacity retains rare outliers, ownership is unclear, or concurrency turns one
+scratch buffer into shared mutable state. Apply a measured capacity cap or let
+an outlier buffer go.
 
-- **It's a constructor.** `func New() *T` returning a heap pointer is
-  idiomatic Go. Do not force callers to pass in a `*T` to save one allocation
-  on a call that happens once.
-- **The object genuinely outlives the call** — stored in a struct, sent on a
-  channel, captured by a goroutine, put in a cache. That's not a leak, that's
-  the design.
-- **It's not hot.** One allocation on a path taken once per request, in a
-  service doing thousands of other things per request, is invisible. A
-  profile will tell you; `-gcflags=-m` will not.
-- **Avoiding it would hurt readability more than the allocation costs.**
-  Threading a scratch buffer through five call frames to save one 24-byte
-  allocation off a cold path is a net loss.
+## Keep hot dispatch visible when evidence supports it
 
-The rule of thumb: fix escapes that are *incidental* (caused by code shape,
-fixable without changing the API's meaning), leave escapes that are
-*intentional* (the value really does need to outlive the frame).
+A concrete internal helper can expose callee behavior and static dispatch:
 
-## Inlining and its interaction with escape
+```go
+func writeBatch(w *bufio.Writer, records []Record) error {
+	for _, record := range records {
+		if _, err := w.WriteString(record.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+```
 
-Inlining and escape analysis are coupled: when a call is inlined, the
-compiler can see the callee's use of an argument, and often proves it doesn't
-escape. When the call isn't inlined, arguments passed by pointer are assumed
-to escape.
+Keep an interface at the public boundary and adapt once outside the hot loop
+when the concrete implementation is truly fixed. A generic helper is another
+option, but it can increase build time and binary size and does not guarantee
+inlining.
+
+**Use when:** a profile shows indirect-call or escape cost and the internal
+type is stable. **Backfires when:** it couples packages, duplicates paths for
+several implementations, or the compiler already devirtualizes the call.
+
+## Treat inlining and escape analysis as coupled evidence
+
+Inlining can expose caller-specific lifetimes and constant values; escape
+summaries can preserve useful facts even when a call is not inlined. Ask the
+compiler what happened:
 
 ```sh
-go build -gcflags='-m' ./... 2>&1 | grep -E 'can inline|cannot inline'
+go build -gcflags='-m=2' ./path/to/pkg 2>&1 | rg 'inline|escape|heap'
 ```
 
-Common inlining blockers (the budget is roughly 80 "nodes" of AST):
+If a hot wrapper is not inlined, keep its common path small and move uncommon
+error or setup work into a helper. Do not depend on a fixed compiler budget or
+assume a particular statement is always an inlining blocker.
 
-- the function is too big
-- it contains a `defer`, a `select`, a `range` over a channel, or a `go`
-  statement
-- it makes a call through an interface or a function value
-- it recurses
+**Use when:** profiles show a very frequent call and diagnostics connect
+inlining to a real allocation or dispatch cost. **Backfires when:** splitting
+fragments cohesive logic, grows code and instruction-cache pressure, or PGO
+and a newer toolchain already make the desired decision.
 
-The practical move is to split a hot function into a small inlinable
-fast path and a `//go:noinline`-eligible slow path — the shape the standard
-library uses in `sync.Mutex.Lock` and `strings.Index`:
+## Leave necessary escapes alone
 
-```go
-func (c *Cache) Get(k string) (V, bool) {
-    if v, ok := c.fast[k]; ok {   // small enough to inline
-        return v, true
-    }
-    return c.slowGet(k)           // the bulk lives here
-}
-```
+Keep heap allocation when any of these is true:
 
-Don't chase inlining generally. Chase it when a profile shows call overhead
-in a function called millions of times, and confirm with a benchmark — the
-`-m` output tells you what the compiler did, not whether it helped.
+- The object genuinely outlives the call: cache entry, shared state,
+  asynchronous message, or returned mutable identity.
+- A constructor runs rarely and pointer semantics make the API clearer.
+- Avoiding the escape requires pervasive scratch parameters, unsafe aliases,
+  or an object pool without measured benefit.
+- A large object is safer and cheaper on the heap than in many growing or
+  recursive stacks.
+- The allocation is absent from representative profiles.
+
+`sync.Pool` does not make an object stack allocated; it amortizes heap objects
+and adds a lifetime protocol. Use it only under the conditions in
+`allocation.md`.
+
+For finalizers, cleanups, cgo handles, or syscalls that use a resource after
+the compiler's last visible reference, place `runtime.KeepAlive` after the
+last operation that requires the owner. Do not use `KeepAlive` to conceal an
+ordinary ownership error.
+
+## Verify the shipped build
+
+After a source-level fix:
+
+1. Build with the production Go version, tags, PGO profile, and architecture.
+2. Confirm the intended decision with `-m=2`.
+3. Run the focused benchmark with `-benchmem -count=10` and compare with
+   `benchstat`.
+4. Recheck the allocation profile under representative load.
+5. Run correctness tests and `-race` for any ownership or concurrency change.
+
+Race and sanitizer instrumentation can change escape and conversion behavior;
+run them for correctness, then measure the production-shaped binary
+separately. Keep the optimization only if the number improves and its
+ownership rules remain understandable.

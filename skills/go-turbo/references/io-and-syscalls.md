@@ -1,308 +1,397 @@
-# I/O and Syscalls
+# I/O and syscalls
 
-A syscall crosses from user space to kernel space: mode switch, possible
-context switch, cache disruption. One is cheap. Ten thousand per second is a
-bottleneck, and it will show up in a CPU profile as time in `syscall` with no
-obvious hot function of your own.
-
-Nearly all I/O optimization in Go is one idea applied at different scales:
-**do the expensive crossing once per batch instead of once per item.**
+The dominant cost in an I/O path is usually the boundary crossed per item:
+kernel calls, storage operations, database round trips, or protocol frames.
+Reduce the number of crossings while preserving latency, durability, and error
+semantics. Confirm the result with syscall counts, profiles, and realistic
+throughput tests.
 
 ## Contents
 
-- [Buffering](#buffering)
-- [Buffer sizing](#buffer-sizing)
-- [Batching](#batching)
-- [Copying streams](#copying-streams)
-- [Framing](#framing)
-- [Reading files](#reading-files)
-- [mmap](#mmap)
+- [Buffer repeated I/O](#buffer-repeated-io)
+- [Size buffers from the workload](#size-buffers-from-the-workload)
+- [Batch without holding locks across I/O](#batch-without-holding-locks-across-io)
+- [Copy streams through existing fast paths](#copy-streams-through-existing-fast-paths)
+- [Frame streams defensively](#frame-streams-defensively)
+- [Choose a file-reading API](#choose-a-file-reading-api)
+- [Memory mapping](#memory-mapping)
+- [Version compatibility](#version-compatibility)
 
-## Buffering
+## Buffer repeated I/O
 
-Unbuffered small writes are one syscall each:
+Small writes made directly to a file or socket may each reach the operating
+system. A `bufio.Writer` combines them. Flush before closing and report both
+flush and close errors:
 
 ```go
-f, _ := os.Create("out.txt")
-for _, line := range lines {
-    f.WriteString(line + "\n")   // one write(2) per line
+func writeLines(path string, lines []string) (retErr error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+
+	w := bufio.NewWriter(f)
+	defer func() {
+		retErr = errors.Join(retErr, w.Flush())
+		retErr = errors.Join(retErr, f.Close())
+	}()
+
+	for _, line := range lines {
+		if _, err := w.WriteString(line); err != nil {
+			return err
+		}
+		if err := w.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 ```
 
-Buffered writes accumulate in user space and cross once per buffer fill:
+Closing the underlying file does not flush `bufio.Writer`. Conversely,
+`Flush` only hands bytes to the underlying writer; it does not promise durable
+storage. If the contract requires crash durability, define when `File.Sync`,
+atomic rename, and directory synchronization are required and test failure
+paths.
 
-```go
-f, err := os.Create("out.txt")
-if err != nil {
-    return err
-}
-defer f.Close()
+For reads, choose by token semantics:
 
-w := bufio.NewWriter(f)
-for _, line := range lines {
-    w.WriteString(line)
-    w.WriteByte('\n')
-}
-return w.Flush()   // without this, the tail is silently lost
+- `bufio.Scanner` is convenient for bounded tokens. Its default maximum token
+  size is `bufio.MaxScanTokenSize`; call `Buffer` before scanning when the
+  protocol permits a larger, explicitly bounded token. Always check `Err`.
+- `bufio.Reader` exposes delimiter and look-ahead operations without imposing
+  Scanner's token model.
+- direct `Read` is appropriate when the caller already supplies suitably sized
+  buffers or the operation is genuinely one-shot.
+
+Do not add buffering between interactive peers without deciding when to flush.
+If each peer waits for buffered data from the other, the optimization becomes a
+protocol deadlock.
+
+## Size buffers from the workload
+
+The default `bufio` size is 4 KiB. That is a library default, not a universal
+page-size or storage-block guarantee. Increase it only when fewer calls improve
+measured throughput for sustained transfers.
+
+Account for multiplication:
+
+```text
+memory ~= live connections * (read buffer + write buffer + queued payloads)
 ```
 
-For a large number of small lines this is routinely an order of magnitude
-faster. It also avoids the `line + "\n"` allocation — two writes beat a
-concatenation.
+A 64 KiB buffer can be insignificant for one bulk copy and expensive when kept
+twice on every connection. Large buffers can also retain rare peak payloads.
+Use a small matrix of sizes and report bytes/op, allocations/op, calls/op,
+throughput, and tail latency. Keep the smallest size on the performance
+plateau.
 
-`bufio.Writer` does **not** flush on close of the underlying file. The
-missing `Flush()` is the most common bufio bug, and it fails silently: the
-data that fits in the buffer just never appears. `defer` the flush *and*
-check its error, since a deferred `Flush` whose error is discarded can hide a
-full disk.
+Preallocate only when a useful bound is known. An oversized buffer paid on
+every request can cost more GC and resident memory than the calls it saves.
 
-Reading is symmetrical. `bufio.Scanner` for lines (note the default 64 KB
-token limit — `Buffer()` raises it), `bufio.Reader` for everything else.
+## Batch without holding locks across I/O
 
-**When not to buffer:** interactive output where the user needs to see
-progress, protocols where the peer waits for your response before continuing
-(buffering there is a deadlock, not a slowdown), and anything where a crash
-losing the buffer contents is unacceptable.
+Batching amortizes fixed cost, but it creates queueing latency and a crash-loss
+window. The batch contract must state its flush trigger, hard item and byte
+bounds, maximum wait, ordering, and delivery semantics.
 
-## Buffer sizing
-
-`bufio` defaults to 4 KB, which matches the typical page size and filesystem
-block size — a sensible default that fits most HTTP headers and small
-payloads.
-
-Larger buffers (16–64 KB) help for sustained streaming of large files or
-high-volume logging: fewer, larger syscalls. Beyond that, returns diminish
-quickly and you're just holding memory. Per-connection buffers multiply by
-connection count — 64 KB read + 64 KB write across 10,000 connections is
-1.3 GB, which is a memory decision disguised as a performance one.
-
-Smaller buffers reduce latency-to-first-byte and memory footprint at the cost
-of more syscalls. Right for interactive tools and low-connection-count,
-latency-sensitive paths.
-
-There is no correct number in the abstract. Measure syscall count
-(`strace -c`, or `perf`) and throughput at a few sizes under realistic load,
-and take the knee.
-
-## Batching
-
-The same principle applied above the syscall layer: to databases, RPCs, and
-remote APIs, where the fixed cost per operation is a round trip rather than a
-mode switch.
-
-```go
-// N round trips.
-for _, e := range events {
-    db.Exec("INSERT INTO events (id, data) VALUES ($1, $2)", e.ID, e.Data)
-}
-
-// One.
-tx, err := db.Begin()
-if err != nil {
-    return err
-}
-stmt, err := tx.Prepare(pq.CopyIn("events", "id", "data"))
-// ... feed rows, then commit
-```
-
-A generic size-triggered batcher:
+Never call a database, RPC, or user callback while holding the mutex that
+protects the producer buffer. Detach the current slice under the lock, install
+a different backing array, and flush the detached batch outside that lock.
+Serialize flushes if ordering matters.
 
 ```go
 type Batcher[T any] struct {
-    mu    sync.Mutex
-    buf   []T
-    size  int
-    flush func([]T)
+	mu      sync.Mutex
+	flushMu sync.Mutex
+	buf     []T
+	spare   []T
+	flushAt int
+	write   func(context.Context, []T) error
 }
 
-func NewBatcher[T any](size int, flush func([]T)) *Batcher[T] {
-    return &Batcher[T]{buf: make([]T, 0, size), size: size, flush: flush}
+func NewBatcher[T any](
+	flushAt int,
+	write func(context.Context, []T) error,
+) (*Batcher[T], error) {
+	if flushAt < 1 {
+		return nil, fmt.Errorf("flush trigger must be positive: %d", flushAt)
+	}
+	if write == nil {
+		return nil, errors.New("batch writer is nil")
+	}
+	return &Batcher[T]{
+		buf:     make([]T, 0, flushAt),
+		spare:   make([]T, 0, flushAt),
+		flushAt: flushAt,
+		write:   write,
+	}, nil
 }
 
-func (b *Batcher[T]) Add(item T) {
-    b.mu.Lock()
-    defer b.mu.Unlock()
-    b.buf = append(b.buf, item)
-    if len(b.buf) >= b.size {
-        b.flushLocked()
-    }
+func (b *Batcher[T]) Add(ctx context.Context, item T) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	b.buf = append(b.buf, item)
+	full := len(b.buf) >= b.flushAt
+	b.mu.Unlock()
+	if !full {
+		return nil
+	}
+	return b.Flush(ctx)
 }
 
-func (b *Batcher[T]) Flush() {
-    b.mu.Lock()
-    defer b.mu.Unlock()
-    b.flushLocked()
+func (b *Batcher[T]) Flush(ctx context.Context) error {
+	// Serialize detach plus delivery so batches cannot overtake one another.
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
+	b.mu.Lock()
+	if len(b.buf) == 0 {
+		b.mu.Unlock()
+		return nil
+	}
+	batch := b.buf
+	b.buf = b.spare[:0]
+	b.spare = nil
+	b.mu.Unlock()
+
+	// write must not retain batch after returning; clone there if it must.
+	err := b.write(ctx, batch)
+
+	clear(batch) // release pointers before retaining the backing array
+	b.mu.Lock()
+	if cap(batch) == b.flushAt {
+		b.spare = batch[:0]
+	} else {
+		// Do not retain a backing array grown by an unusual concurrent burst.
+		b.spare = make([]T, 0, b.flushAt)
+	}
+	b.mu.Unlock()
+	return err
 }
 
-func (b *Batcher[T]) flushLocked() {
-    if len(b.buf) == 0 {
-        return
-    }
-    b.flush(b.buf)
-    b.buf = b.buf[:0]
+func (b *Batcher[T]) Run(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("flush interval must be positive: %s", interval)
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-ticker.C:
+			if err := b.Flush(ctx); err != nil {
+				return err
+			}
+		}
+	}
 }
 ```
 
-Three things this deliberately gets right, and that hand-rolled batchers
-usually get wrong:
+This design is safe for concurrent `Add` and `Flush`, does not expose a slice
+that producers continue to mutate, serializes callbacks, propagates callback
+errors, and stops its ticker. Producers may append while a slow flush runs, so
+the trigger is not a hard queue bound. Bound their concurrency and add a byte
+limit or a bounded input channel when item sizes or producer counts vary.
 
-- **`flush` must not call `Add`.** Go mutexes are not reentrant; that
-  deadlocks. If the flush function needs to re-enqueue failures, hand it a
-  copy and let it route them elsewhere.
-- **`b.buf[:0]` reuses the backing array**, so steady-state allocation is
-  zero. But it also means `flush` must not retain the slice past its call —
-  copy inside `flush` if it does.
-- **A size trigger alone starves the tail.** In production you also want a
-  time trigger (a `time.Ticker` calling `Flush`) so the last few items in a
-  quiet period aren't held indefinitely, and a `Flush` on shutdown.
+Run the timer loop under supervision and treat its returned error as fatal to
+the batching pipeline. `Add` likewise returns a size-triggered flush error to
+its caller. On shutdown, cancel and join producers, stop `Run`, then call
+`Flush` with a new bounded shutdown context. The canceled run context is not a
+usable flush context.
 
-**The cost of batching is data loss on crash.** Anything in the buffer when
-the process dies is gone. For transactional or critical data, either flush
-synchronously on the critical path or write to durable storage before
-acknowledging. Batching latency is also real: an item can wait up to a full
-batch interval. If per-item latency is the SLO, batch smaller or not at all.
+The writer owns the detached batch for the duration of its call. On error, the
+batcher does not blindly requeue it because the writer may have committed a
+prefix. The writer must provide transactional or idempotent semantics when
+retries are required. Persist before acknowledging if process-crash loss is
+unacceptable. The writer must not call `Add` or `Flush` on the same batcher;
+flushes are serialized and such re-entry can deadlock. Run exactly one timer
+loop per batcher.
 
-Batching also reduces allocations sharply — one large operation instead of
-N small ones — which sometimes matters more than the syscall savings.
+For databases, use the driver's real bulk facility or a transaction with
+prepared statements; concatenating SQL is neither a safe nor necessarily fast
+batch. For sockets that support scatter/gather, `net.Buffers.WriteTo` may map
+several byte slices to an OS-specific vector write without first concatenating
+them. `WriteTo` consumes the `net.Buffers` slice headers, so reconstruct that
+slice before reuse; it does not mutate the payload bytes.
 
-## Copying streams
+## Copy streams through existing fast paths
+
+`io.Copy` first uses `src.(io.WriterTo)`, then `dst.(io.ReaderFrom)`, and only
+uses an internal scratch buffer when neither fast path exists. Preserve those
+interfaces when wrapping files or connections; an unnecessary wrapper can hide
+an optimized transfer path.
+
+`io.CopyBuffer` lets the caller supply scratch space for the generic path:
 
 ```go
-io.Copy(dst, src)                    // allocates a 32 KB buffer per call
-io.CopyBuffer(dst, src, buf)         // reuses yours
+buf := make([]byte, 32<<10)
+_, err := io.CopyBuffer(dst, src, buf)
 ```
 
-For a server copying per request, `io.CopyBuffer` with a pooled buffer
-eliminates that allocation:
+The exact best size is workload-dependent. A buffer passed to `CopyBuffer` is
+ignored when a `WriterTo` or `ReaderFrom` fast path applies. Never pass a
+zero-length slice.
+
+Pooling scratch space is a paid optimization. Use it only after the generic
+copy allocation is visible and concurrent retained memory is acceptable:
 
 ```go
-var copyBufPool = sync.Pool{
-    New: func() any { b := make([]byte, 32*1024); return &b },
+var copyBuffers = sync.Pool{
+	New: func() any { return new([32 << 10]byte) },
 }
 
-func proxy(dst io.Writer, src io.Reader) error {
-    bp := copyBufPool.Get().(*[]byte)
-    defer copyBufPool.Put(bp)
-    _, err := io.CopyBuffer(dst, src, *bp)
-    return err
+func copyStream(dst io.Writer, src io.Reader) error {
+	// turbo: pools 32 KiB scratch after copy allocation appeared in profiles;
+	// callers and the copy operation must not retain the buffer.
+	buf := copyBuffers.Get().(*[32 << 10]byte)
+	defer copyBuffers.Put(buf)
+	_, err := io.CopyBuffer(dst, src, buf[:])
+	return err
 }
 ```
 
-Pool a `*[]byte`, not a `[]byte` — putting a slice into a `sync.Pool` boxes
-the slice header into an interface and allocates on every `Put`, which
-defeats the point.
+`sync.Pool` may discard entries at any garbage collection and is not a capacity
+reservation. Cap pooled object size, clear pointer-bearing data, and compare
+`allocs/op` plus peak memory before keeping it.
 
-Both `io.Copy` and `io.CopyBuffer` skip the buffer entirely when `src`
-implements `io.WriterTo` or `dst` implements `io.ReaderFrom`. That's how
-`net/http` gets `sendfile` for `*os.File` bodies — kernel-to-kernel with no
-user-space copy at all. Don't wrap a `*os.File` in something that hides those
-interfaces if you want that path.
+Avoid converting between `[]byte` and `string` only to satisfy an intermediate
+API. Prefer reader/writer or byte-oriented APIs through the pipeline. If a
+consumer retains data read into reusable storage, copy the retained portion
+into a right-sized slice at that ownership boundary.
 
-## Framing
+## Frame streams defensively
 
-For length-prefixed protocols, naive `Read` loops fragment badly: a message
-can span reads, and a read can contain several messages.
-
-`bufio.Reader.Peek` inspects buffered bytes without consuming them, so you
-can find a boundary before committing:
+TCP is a byte stream: a `Read` can return part of a frame or several frames.
+Use a bounded framing format and `io.ReadFull` for fixed-width pieces.
 
 ```go
-r := bufio.NewReaderSize(conn, 8*1024)
+func readFrame(r *bufio.Reader, maxFrame int) ([]byte, error) {
+	if maxFrame < 0 {
+		return nil, fmt.Errorf("negative frame limit: %d", maxFrame)
+	}
+	header, err := r.Peek(4)
+	if err != nil {
+		return nil, err
+	}
+	encodedSize := binary.BigEndian.Uint32(header)
+	if uint64(encodedSize) > uint64(maxFrame) {
+		return nil, fmt.Errorf(
+			"frame size %d exceeds limit %d",
+			encodedSize,
+			maxFrame,
+		)
+	}
+	if _, err := r.Discard(4); err != nil {
+		return nil, err
+	}
 
-for {
-    hdr, err := r.Peek(4)              // look, don't consume
-    if err != nil {
-        return err
-    }
-    n := binary.BigEndian.Uint32(hdr)
-    if n > maxFrame {
-        return fmt.Errorf("frame too large: %d", n)   // always bound this
-    }
-
-    if _, err := r.Discard(4); err != nil {
-        return err
-    }
-    payload := make([]byte, n)
-    if _, err := io.ReadFull(r, payload); err != nil {
-        return err
-    }
-    handle(payload)
+	payload := make([]byte, int(encodedSize))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 ```
 
-The `maxFrame` check is not optional: an attacker-controlled length prefix
-without a bound is a remote OOM.
+Set a read deadline at the connection layer so a peer cannot reserve the
+declared frame forever. Validate the length before conversion or allocation.
+When reusing a payload buffer, document that the handler may not retain it; copy
+only the portion that crosses into a longer lifetime.
 
-If `handle` doesn't retain the payload, read into a reused buffer instead of
-allocating per frame — but then `handle` must copy anything it keeps. That
-tradeoff is the whole zero-copy question in miniature.
+`Peek` and methods such as `ReadSlice` return views into the reader's buffer.
+Those bytes are invalidated by later reads. This is useful for synchronous
+parsing and unsafe for asynchronous handoff without a copy.
 
-## Reading files
+## Choose a file-reading API
 
-Match the API to the size and access pattern:
+- `os.ReadFile` is clear for a file whose maximum size is trusted and small
+  enough to hold in memory. Validate size at a trust boundary rather than
+  assuming a configuration file is small.
+- `bufio.Scanner` streams bounded tokens.
+- `bufio.Reader` or a decoder over `io.Reader` streams structured data.
+- `File.ReadAt` supports independent positional reads and is safe for
+  concurrent calls. Avoid shared `Seek` plus `Read` across goroutines.
+- `io.SectionReader` gives a bounded view over a `ReaderAt` without changing a
+  shared file offset.
 
-- `os.ReadFile` — whole file into memory, one allocation. Right for config
-  and small files. Wrong for anything that could be large: memory usage
-  equals file size. (Go 1.26 made `io.ReadAll` substantially cheaper, which
-  helps the streaming-into-memory case too.)
-- `bufio.Scanner` — line-oriented streaming, constant memory. Watch the
-  64 KB default token limit.
-- `bufio.Reader` — streaming with control over framing.
-- `os.File.ReadAt` — random access without seeking; safe for concurrent use
-  from multiple goroutines, unlike `Seek`+`Read`.
+Whole-file reads and `io.ReadAll` intentionally allocate for the entire input.
+Put an explicit byte limit before them for network input or untrusted files.
+For sequential large files, buffered streaming is usually the simplest strong
+baseline.
 
-## mmap
+## Memory mapping
 
-Memory mapping is often called zero-copy. That's only half true, and the
-distinction determines whether it helps you.
-
-Mapping a file and then reading *out of it into your own buffer* still
-copies. What you save is the per-call syscall: the pages are already mapped,
-so reads are memory accesses rather than `pread` calls. Real, but modest —
-this is syscall avoidance, not copy avoidance.
-
-Mapping a file and operating **directly on the mapped pages** is actual
-zero-copy: hash it, parse it, scan it in place, and the kernel-to-user copy
-never happens.
+Mapping replaces explicit read syscalls with page faults and memory accesses.
+It is only zero-copy when the algorithm works directly on the mapped bytes. If
+those bytes are copied into another buffer, mapping avoided read calls but did
+not avoid the copy.
 
 ```go
-f, err := os.Open(path)
-if err != nil {
-    return err
-}
-defer f.Close()
+func withMappedFile(path string, use func([]byte) error) (retErr error) {
+	// turbo: mmap removes measured read calls for stable large files at the
+	// cost of platform-specific fault and lifetime semantics.
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, f.Close()) }()
 
-fi, err := f.Stat()
-if err != nil {
-    return err
-}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return use(nil)
+	}
+	if info.Size() > int64(maxInt) {
+		return fmt.Errorf("file is too large to map: %d", info.Size())
+	}
 
-data, err := unix.Mmap(int(f.Fd()), 0, int(fi.Size()),
-    unix.PROT_READ, unix.MAP_SHARED)
-if err != nil {
-    return err
+	data, err := unix.Mmap(
+		int(f.Fd()),
+		0,
+		int(info.Size()),
+		unix.PROT_READ,
+		unix.MAP_PRIVATE,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, unix.Munmap(data)) }()
+	return use(data)
 }
-defer unix.Munmap(data)
-
-sum := xxhash.Sum64(data)   // no copy: reads the mapped pages directly
 ```
 
-How much this wins depends entirely on what dominates:
+`maxInt` is a local architecture-sized bound, for example `int(^uint(0) >> 1)`.
+Place mapping code in platform-specific files. The callback must not retain the
+slice after unmap.
 
-- **Memory-bound work** (hashing with a fast hash, scanning, searching):
-  removing a multi-megabyte copy from the critical path can roughly halve
-  wall time.
-- **Compute-bound work** (SHA-256, decompression, complex parsing): the copy
-  was never the bottleneck. Expect a modest gain from reduced memory
-  bandwidth pressure, nothing dramatic.
+Mapping has failure modes ordinary reads avoid: access can block on a page
+fault, and truncating or mutating the mapped file can fault the process or
+produce inconsistent observations. Atomic replacement normally leaves an
+existing mapping attached to the old file object. Mapping lifetime is outside
+normal Go heap accounting. Coordinate writers, bound mapping count and size,
+and unmap deterministically. Random access and in-place scans of large, stable
+files are plausible use cases; sequential reads need a benchmark before
+accepting the added lifecycle and portability cost.
 
-The costs are real: a page fault mid-access can block the OS thread (the
-runtime cannot park a goroutine on a page fault the way it does for network
-I/O), truncating a mapped file crashes the process with SIGBUS, mappings
-consume address space, and it is platform-specific enough to complicate
-builds. Note also that `golang.org/x/exp/mmap` does not expose the mapped
-bytes — its `ReadAt` copies, so it gives you syscall avoidance only.
+The final check is end-to-end. Fewer syscalls can still lose if batching raises
+latency, buffers inflate memory, or a hidden copy remains. Keep the simplest
+implementation that meets the measured service objective.
 
-Use mmap for large, read-mostly, randomly-accessed files where you can work
-in place — index files, embedded databases, large static datasets. For
-sequential streaming, buffered reads are simpler and about as fast.
+## Version compatibility
+
+The generic batcher requires Go 1.18; `errors.Join` and `context.Cause` require
+Go 1.20; and the `clear` built-in requires Go 1.21. On older supported modules,
+use a typed batcher, return `ctx.Err()`, preserve multiple cleanup errors
+explicitly, and zero pointer-bearing elements with a loop before retaining the
+backing array. The mmap example uses
+`golang.org/x/sys/unix`; select a dependency version compatible with the
+module, keep it platform-tagged, and do not add it merely to avoid ordinary
+file reads.

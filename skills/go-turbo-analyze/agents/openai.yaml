@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo Analyze"
+  short_description: "Diagnose Go performance without changing code"
+  default_prompt: "Use $go-turbo-analyze to diagnose this Go performance problem and rank the evidence."
+policy:
+  allow_implicit_invocation: false

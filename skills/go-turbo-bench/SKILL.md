@@ -7,9 +7,8 @@ description: >
   and reading statistical significance. Use when the user says "benchmark
   this", "write a benchmark", "is this actually faster", "compare these two
   implementations", "benchstat", "the benchmark says X", "measure this",
-  "/go-turbo-bench", or shows benchmark output and asks what it means. Also
+  "$go-turbo-bench", or shows benchmark output and asks what it means. Also
   use before claiming any Go optimization worked.
-license: MIT
 ---
 
 # go-turbo-bench
@@ -129,28 +128,33 @@ go test -bench=. -benchmem -count=10 -run=^$ ./pkg > new.txt
 benchstat old.txt new.txt
 ```
 
-Read three things, in this order:
+Read the result as a set:
 
-1. **`p`** — `p ≥ 0.05` or `~` in the delta column means no statistically
-   distinguishable difference. Report that as "no measurable change." It is a
-   result, not a failure.
-2. **`±`** — variance. Above ~5% means the benchmark is too noisy for small
-   deltas; fix the noise before trusting the number.
-3. **The percentage** — only once the first two check out.
+1. **The distributions and comparison marker.** With benchstat's default
+   test, `~` means the collected samples do not distinguish the versions at
+   the configured confidence level. Report "no measurable change in this
+   experiment," not "identical."
+2. **Noise and overlap.** Large run-to-run spread relative to the effect means
+   the experiment lacks resolution. Find the noise source or collect a better
+   workload before trusting a small delta.
+3. **The effect size and metrics.** Interpret `ns/op`, `B/op`, and `allocs/op`
+   together; a statistically detectable change can still be operationally
+   irrelevant.
 
-Both versions must run in the same session on the same machine. Comparing
-today's run against last month's on another host measures the hosts.
+Keep the machine, power state, toolchain, flags, inputs, and background load
+constant. Interleave or randomize old/new runs when drift or thermal state may
+matter. Comparing today's run against last month's on another host measures
+the environments as well as the code.
 
 ## Reducing noise
 
-In descending order of value: close other applications; raise `-count`; pin
-CPU frequency (governor to `performance`, turbo off — a turbo window makes a
-run look fast that a thermally-throttled one doesn't get); pin cores with
-`taskset -c 2,3`, avoiding core 0; use a quiet dedicated machine.
+Use a quiet, thermally stable machine; keep power settings fixed; raise
+`-count`; and record the environment. CPU affinity or frequency controls are
+platform-specific interventions: use them only when understood and apply them
+identically to both versions.
 
-Shared CI runners are the worst case. CI benchmark numbers catch
-order-of-magnitude regressions and nothing finer — set thresholds
-accordingly rather than pretending they're precise.
+Shared CI runners are often noisy. Calibrate a threshold from that runner's
+observed variance, or use a dedicated benchmark host for small regressions.
 
 ## Reporting
 
@@ -169,8 +173,9 @@ n=10, `p=0.000`, on this machine" is a claim. "34% faster" is marketing.
 
 - **Sub-nanosecond ns/op** — the compiler deleted the work. Use `b.Loop()`
   or a sink.
-- **allocs/op unchanged but ns/op improved a lot** — suspect measurement
-  error before celebrating.
+- **allocs/op unchanged but ns/op improved a lot** — check the statistics and
+  mechanism. Algorithmic, contention, copying, and instruction-count wins can
+  legitimately change time without changing allocations.
 - **Benchmark faster, service unchanged** — the function wasn't the
   bottleneck. Go back to profiling.
 - **Comparing across Go versions or machines** — that's a different
@@ -182,8 +187,8 @@ n=10, `p=0.000`, on this machine" is a claim. "34% faster" is marketing.
 ## Boundaries
 
 Writes and interprets benchmarks. For finding what to benchmark, use
-`/go-turbo-analyze`; for applying and validating a fix, `/go-turbo-improve`.
-Load `references/measurement.md` from the `go-turbo` skill for profiling and
-load-testing workflows.
-
-"stop go-turbo-bench" or "normal mode" to revert.
+`$go-turbo-analyze`; for applying and validating a fix, `$go-turbo-improve`.
+When the core skill is installed alongside this one, load its complete
+[measurement reference](../go-turbo/references/measurement.md) for profiling
+and load-testing workflows. This workflow remains usable without that optional
+reference. Task-scoped.

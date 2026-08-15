@@ -1,77 +1,62 @@
 # go-turbo
 
-Performance rules for Go in this repository. Portable across agents that read
-`AGENTS.md`. Full detail lives in `skills/go-turbo/SKILL.md` and its
-`references/`.
+Use `skills/go-turbo/SKILL.md` for Go implementation and performance work.
+It contains the full workflow and routes to focused references. These rules
+are the portable minimum for agents that read only `AGENTS.md`.
 
-## Stance
+## Engineering stance
 
-Write Go the way a staff performance engineer would: allocation-aware
-idiomatic Go by default, restructured for speed only where a measurement says
-it matters. Fast Go and idiomatic Go are usually the same code. When they
-diverge, say so and let the number decide.
+Write clear, idiomatic Go first. Treat latency, throughput, and memory as
+workload-specific measurements. Preserve behavior, error handling, ownership,
+race freedom, context propagation, cancellation, validation, deadlines, and
+resource cleanup.
 
-## The ladder
+Work down this ladder and stop when further complexity is not justified:
 
-Work top-down. Stop when the cost stops justifying the complexity.
+1. Remove, defer, cache, coalesce, or short-circuit unnecessary work.
+2. Choose the right algorithm, data structure, index, and ownership model.
+3. Reduce material hot-path allocation and unintended retention.
+4. Remove incidental heap escapes confirmed by compiler diagnostics.
+5. Amortize syscalls, queries, RPCs, encodes, locks, and handoffs.
+6. Bound concurrency and address measured contention or backpressure.
+7. Only then tune layout, pooling, the runtime, protocols, or machine details.
 
-1. Does the work need to happen at all?
-2. Is the algorithm and data structure right? (Nothing below rescues a bad
-   complexity class.)
-3. Does it allocate on the hot path?
-4. Does it escape when it doesn't have to?
-5. Does it cross an expensive boundary per item — syscall, round trip, query,
-   lock?
-6. Does it contend?
-7. Only then: memory layout, false sharing, inlining, `unsafe`, SIMD.
+## Safe baseline
 
-## Free wins — apply while writing, no profile needed
+Apply ordinary, semantics-preserving improvements when their preconditions are
+known:
 
-- `make([]T, 0, n)` / `make(map[K]V, n)` when `n` is known or boundable
-- `strings.Builder` with `Grow` instead of `+=` in a loop
-- `bufio` around any file or socket touched more than once
-- struct fields ordered widest-first
-- `copy` into a right-sized slice before handing a sub-slice of a big buffer
-  to anything that may retain it
-- stay in `[]byte` rather than round-tripping through `string`
-- `sync.OnceValue` over hand-rolled init flags
-- reuse compiled regexps, templates, and `time.Location` values
+- preallocate from an exact or defensible bound, not an untrusted maximum;
+- use append-style byte APIs or `strings.Builder` for repeated construction;
+- buffer repeated small I/O only with an explicit flush and error contract;
+- avoid needless `string` and `[]byte` round trips;
+- reuse immutable compiled regexps, templates, locations, clients, and
+  transports where their APIs support concurrent reuse;
+- copy a small view when a longer-lived owner would retain a large buffer;
+- bound fan-out and queues, propagate cancellation, and set network deadlines.
 
-## Paid wins — need a profile or benchmark first
+Do not assume pointers are cheaper than values. Do not reorder exported or
+wire-visible structs casually. Do not preallocate from attacker-controlled
+sizes. Do not add concurrency merely to make code look parallel.
 
-`sync.Pool`, zero-copy slice sharing, lock-free structures, `unsafe`, manual
-layout, GC tuning. Each one ships with a comment naming what was traded:
+## Evidence gate
 
-```go
-// turbo: pooled 32 KB buffers; caller must not retain past Handle().
-// Drop the pool if allocation stops showing in profiles.
-```
+Require a representative profile, trace, benchmark, or production metric
+before adding lifetime rules, aliasing, portability limits, or operational
+tuning. This includes `sync.Pool`, zero-copy sharing, manual padding,
+sharded/lock-free synchronization, mmap, raw socket controls, GC knobs, PGO,
+`unsafe`, assembly, and SIMD.
 
-## Evidence discipline
+For a justified complex optimization, record the measured benefit, workload,
+ownership or portability contract, and removal trigger next to the code. Never
+claim “faster” from code inspection alone.
 
-- No profile, no paid win. Free wins and algorithmic fixes are always fair.
-- Benchmark with `-benchmem -count=10`, compare with `benchstat`. One run is
-  a sample of size one.
-- Report `allocs/op` alongside `ns/op`. It's the more stable number and it
-  usually explains the other.
-- If you can't measure, say which rung you applied and what would need
-  measuring to go further.
-
-## Never trade these for speed
-
-Race freedom (`-race` on any concurrency change), error handling, context
-propagation and cancellation, input validation at trust boundaries, deadlines
-on network I/O, and readability when the payoff is unmeasured.
-
-## Let Go be Go
-
-Over-preallocation is not free. `append` is well tuned. Pointers are not
-automatically cheaper than values. The compiler already inlines, eliminates
-dead code, and removes redundant bounds checks. C and C++ habits applied
-verbatim frequently make Go slower.
+For local comparisons, run focused benchmarks with `-benchmem -count=10` and
+compare with `benchstat`. Report `ns/op`, `B/op`, and `allocs/op`, plus Go
+version, architecture, and input distribution. Run `go test -race` for shared
+state or concurrency changes. State any production or load gate not exercised.
 
 ## Output
 
-Code first, then at most: one line per non-obvious change, the measurement
-(or an explicit note that there isn't one), and the next rung you'd climb.
-No essays defending optimizations.
+Lead with code or the verdict. Then state non-obvious tradeoffs, actual evidence
+or `not measured`, correctness checks, and the next justified rung.

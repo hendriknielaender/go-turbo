@@ -7,17 +7,16 @@ description: >
   premature optimizations that cost readability for nothing. One line per
   finding with the fix. Use when the user says "review this for performance",
   "perf review", "will this be slow", "review this PR", "any performance
-  issues here", "/go-turbo-review", or shares a diff and asks about
+  issues here", "$go-turbo-review", or shares a diff and asks about
   performance impact. Complements correctness review — this one only hunts
   performance.
-license: MIT
 ---
 
 # go-turbo-review
 
 Review the diff for performance. One line per finding: location, what's
-wrong, what replaces it. The best outcome is a diff that allocates less than
-the one you were given.
+wrong, what replaces it. The best outcome is no actionable performance
+regression and no speculative complexity.
 
 Two directions matter equally here. Reviewers reliably catch the added
 allocation; they reliably miss the `sync.Pool` added to a cold path, which
@@ -55,15 +54,15 @@ Not this:
 This:
 
 - `L34: alloc: append into nil slice, len(rows) known. make([]Result, 0, len(rows)).`
-- `L12: escape: returns *Point for a 16-byte struct. Return by value.`
+- `L12: escape: measured constructor allocation comes from returning *Point; identity and nil are unused. Return Point by value and remeasure.`
 - `L88: algo: linear scan of routes inside the request loop, O(n·m). Build the map once at startup.`
-- `L51: sync: goroutine per message, unbounded. errgroup with SetLimit(runtime.GOMAXPROCS(0)).`
+- `L51: sync: goroutine per message, unbounded. Use errgroup.SetLimit with a bound derived from the CPU or dependency budget.`
 - `L23: io: db.Exec per row inside the loop. Batch with CopyIn or a multi-value insert.`
-- `L67: net: resp.Body closed but never drained. io.Copy(io.Discard, resp.Body) or the connection isn't reused.`
+- `L67: net: this bounded HTTP/1 body is not consumed to EOF before Close, so reuse may be lost. Consume it or deliberately forgo reuse.`
 - `L102: leak: queue <- buf[:n] retains the full 32 KB pool buffer per message. Copy first.`
 - `L45: premature: sync.Pool for a struct allocated once per request on a config path. Delete it; the lifetime risk buys nothing here.`
 - `L9: alloc: string(payload) then back to []byte at L14. Stay in []byte; bytes has the same helpers.`
-- `L77: net: http.Client constructed per request. Hoist to a package-level client or connection pooling never happens.`
+- `L77: net: a new custom http.Transport is created per request, fragmenting connection pools. Reuse a configured client and transport.`
 
 ## Judgment
 
@@ -73,10 +72,10 @@ matters is the entire value of this skill.
 - **Hot path or not?** An allocation in a startup function or a CLI flag
   parser is not a finding. If you can't tell whether a path is hot, say so:
   `L20: alloc: … — if this is per-request, fix it; if it's startup, ignore.`
-- **Free or paid?** Free fixes (preallocation, `strings.Builder`, buffered
-  I/O, field order) are always fair to request. Paid fixes (pooling,
-  zero-copy, `unsafe`) should be raised as questions with a measurement
-  attached, not demanded.
+- **Baseline or evidence-gated?** Request a simple fix only when its size,
+  lifetime, flush, error, and compatibility preconditions are visible. Pooling,
+  zero-copy, manual layout, sharding, and `unsafe` require a measurement and
+  explicit tradeoff; raise them as experiments, not demands.
 - **Don't invent hot paths.** If the diff touches a config loader, review it
   as a config loader.
 - **A `turbo:` comment on a deliberate tradeoff is not a finding.** It's the
@@ -92,8 +91,8 @@ End with the estimate that matters:
 net: -<N> allocs/op on the hot path, -<M> round trips per request.
 ```
 
-Quantify only what you can defend. If the diff is clean:
-`Allocation-clean. Ship.`
+Quantify only what measured evidence can defend. If the diff is clean:
+`No actionable performance finding.`
 
 ## Boundaries
 
@@ -101,7 +100,6 @@ Performance only. Correctness bugs, security issues, and style go to a normal
 review pass — mention them in one line if severe and move on, but don't take
 them over. Lists findings, applies nothing. One-shot.
 
-For a whole repository rather than a diff, use `/go-turbo-audit`. To apply
-the fixes, `/go-turbo-improve`.
-
-"stop go-turbo-review" or "normal mode" to revert.
+For a whole repository rather than a diff, use `$go-turbo-audit`. To apply
+the fixes, `$go-turbo-improve`.
+Task-scoped.

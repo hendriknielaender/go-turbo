@@ -1,0 +1,48 @@
+{
+  "name": "go-turbo",
+  "version": "0.0.0",
+  "description": "Evidence-driven Go performance engineering for implementation, review, diagnosis, benchmarking, profiling, networking, and production scaling.",
+  "author": {
+    "name": "Hendrik Nielaender",
+    "url": "https://github.com/hendriknielaender"
+  },
+  "homepage": "https://github.com/hendriknielaender/go-turbo",
+  "repository": "https://github.com/hendriknielaender/go-turbo",
+  "license": "MIT",
+  "keywords": [
+    "go",
+    "golang",
+    "performance",
+    "profiling",
+    "benchmarking",
+    "pprof",
+    "escape-analysis",
+    "gc",
+    "concurrency"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Go Turbo",
+    "shortDescription": "Measured Go performance",
+    "longDescription": "Write, review, diagnose, benchmark, profile, and improve production Go with evidence-driven performance judgment. Preserve correctness and idiomatic design; add complex optimizations only when representative measurements justify them.",
+    "developerName": "Hendrik Nielaender",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Write idiomatic, production-ready Go",
+      "Diagnose CPU, latency, memory, and scaling bottlenecks",
+      "Design representative benchmarks and profiling plans",
+      "Review performance changes without sacrificing correctness"
+    ],
+    "websiteURL": "https://github.com/hendriknielaender/go-turbo",
+    "privacyPolicyURL": "https://github.com/hendriknielaender/go-turbo/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/hendriknielaender/go-turbo/blob/main/TERMS.md",
+    "defaultPrompt": [
+      "$go-turbo review this Go change for performance risks and prioritize only evidence-backed fixes.",
+      "$go-turbo implement this Go component with bounded concurrency, clear ownership, and production-ready error handling.",
+      "$go-turbo diagnose this latency regression and tell me what to measure before changing code."
+    ],
+    "brandColor": "#C96A00",
+    "composerIcon": "./assets/go-turbo.png",
+    "logo": "./assets/go-turbo.png"
+  }
+}

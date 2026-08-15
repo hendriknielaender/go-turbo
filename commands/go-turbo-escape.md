@@ -5,4 +5,7 @@ argument-hint: "[package or path]"
 
 Run the `go-turbo-escape` skill on: $ARGUMENTS
 
-Run `go build -gcflags=-m`, narrow to hot paths, classify each escape as incidental (fixable by code shape) or necessary (the value genuinely outlives the frame), and give the concrete restructure for the incidental ones. Verify with allocs/op, not with `-m` output.
+Run `go build -gcflags='-m=2'`, narrow to paths relevant to the workload, and
+classify each escape as incidental or required by lifetime. A non-inlined call
+does not itself imply escape. Verify impact with allocations and benchmarks;
+compiler diagnostics explain cause, not cost.

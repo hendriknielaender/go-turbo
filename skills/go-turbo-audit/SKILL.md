@@ -8,14 +8,13 @@ description: >
   profiling coverage. Use when the user says "audit this codebase for
   performance", "where are the performance problems in this repo", "perf
   audit", "scan for allocations", "is this service going to scale",
-  "/go-turbo-audit", or points at a repo and asks what to fix first.
+  "$go-turbo-audit", or points at a repo and asks what to fix first.
   One-shot report, applies nothing.
-license: MIT
 ---
 
 # go-turbo-audit
 
-`/go-turbo-review`, repo-wide. Same tags, same discipline, wider scope, and
+`$go-turbo-review`, repo-wide. Same tags, same discipline, wider scope, and
 one extra job: assess whether the repo can even tell whether it's fast.
 
 Ranking matters more here than in a diff review. A repo-wide scan surfaces
@@ -34,16 +33,18 @@ finding in `cmd/migrate` is not equal to a finding in the request path.
 
 ## Scan
 
-Compiler and tooling first — they're fast and they're evidence:
+Use compiler and repository tooling early. Compiler diagnostics explain code
+shape; they do not prove runtime impact:
 
 ```sh
 go vet ./...
-go build -gcflags=-m ./... 2>&1 | grep -E 'escapes to heap|moved to heap'
-go test -bench=. -benchmem -run=^$ ./... 2>&1     # existing benchmarks
+go build -gcflags='-m=2' ./... 2>&1 | rg 'escapes to heap|moved to heap'
+go test -bench=. -benchmem -run='^$' ./... 2>&1  # only when the suite is bounded and safe
 ```
 
-If `golangci-lint` is available, the `prealloc`, `fieldalignment`, and
-`bodyclose` analyzers each map directly to findings here.
+If project linters are available, use their configured checks as candidates.
+Confirm each candidate on a relevant path; do not install or enable a linter
+solely to manufacture performance findings.
 
 Then read for the patterns that static analysis misses:
 
@@ -57,21 +58,24 @@ exit path; channels used as hot-path queues; a single mutex over a structure
 touched by everything; `sync.Map` used as a general-purpose map;
 `sync.RWMutex` guarding very short critical sections.
 
-**I/O** — queries or RPCs inside loops (the N+1 pattern); unbuffered file and
-socket writes; `io.Copy` per request without a pooled buffer; `os.ReadFile`
-on files that could be large.
+**I/O** — queries or RPCs inside loops (the N+1 pattern); repeated small file
+or socket operations that could be buffered with correct flush semantics;
+unbounded whole-file reads; callbacks or network I/O performed while holding
+unrelated locks.
 
-**Networking** — `http.Client` constructed per request; response bodies
-closed but not drained; default `MaxIdleConnsPerHost` (2) on a
-high-concurrency client; `http.Server` with no `ReadHeaderTimeout`; network
-reads with no deadline.
+**Networking** — a new custom `http.Transport` per request; required response
+bodies not read to EOF and closed; pool limits shown by telemetry to be too
+small; servers missing workload-appropriate timeouts; network operations with
+no deadline or cancellation path.
 
 **Leak shapes** — sub-slices of pooled or large buffers sent to queues or
 caches; unbounded in-memory queues, caches without eviction; contexts created
 without `defer cancel()`; goroutines started in `init` or constructors.
 
-**Layout** — badly ordered fields in structs allocated in bulk; atomic
-counters adjacent in a struct written by different goroutines.
+**Layout** — measured padding in structs allocated at material volume; shared
+counters with profiler or hardware evidence of false sharing. Treat exported,
+encoded, reflected, cgo, and `unsafe`-observed layouts as compatibility
+boundaries.
 
 **Premature optimization** — `sync.Pool` on cold paths; `unsafe` without a
 benchmark; hand-rolled versions of stdlib; GC knobs set in code with no
@@ -82,7 +86,7 @@ Also harvest existing `turbo:` markers — deliberate tradeoffs the codebase
 already made:
 
 ```sh
-grep -rn '// *turbo:' --include='*.go' .
+rg -n '// *turbo:' -g '*.go' .
 ```
 
 Any marker naming a ceiling but no revisit trigger gets flagged
@@ -94,13 +98,14 @@ A repo that can't measure itself can't defend a change. Report:
 
 - benchmarks: how many, covering which hot paths, which have none
 - `-benchmem` used? `b.Loop()` or a sink, or dead-code-eliminable?
-- is `net/http/pprof` exposed in the service binary?
-- is there a `default.pgo`? (PGO is typically a few percent for near-zero
-  effort — its absence is a standing finding for any service)
-- `GOMEMLIMIT` set in the container config?
+- is there a protected, operable way to capture profiles from the service?
+- is PGO evaluated with a representative, current profile where deployment
+  stability makes it appropriate?
+- is the runtime memory limit intentionally configured relative to the real
+  container or host budget, with non-Go memory headroom?
 
-Missing benchmark coverage on the top hot path usually outranks any
-individual allocation finding, because it blocks every fix below it from
+Missing representative measurement on the top path usually outranks an
+individual speculative allocation finding because it blocks that fix from
 being verified.
 
 ## Output
@@ -114,13 +119,13 @@ Ranked, biggest first, tail cut:
     effort: trivial | moderate | invasive
 ```
 
-Tags are `/go-turbo-review`'s: `alloc:`, `escape:`, `algo:`, `sync:`, `io:`,
+Tags are `$go-turbo-review`'s: `alloc:`, `escape:`, `algo:`, `sync:`, `io:`,
 `net:`, `leak:`, `premature:`, `layout:`.
 
 Then:
 
 ```
-coverage: <N> benchmarks, <M> hot paths uncovered. pprof: <yes|no>. PGO: <yes|no>.
+coverage: <N> benchmarks, <M> important paths uncovered. profiles/load tests: <what exists>.
 turbo debt: <N> markers, <M> with no revisit trigger.
 top 3: <the three things to do first, one line each>
 ```
@@ -134,9 +139,9 @@ Clean repo: `No structural performance problems found. Benchmark coverage is
 ## Rules
 
 - **Rank ruthlessly.** Three real findings beat forty speculative ones.
-- **Distinguish evidence from inference.** Compiler output and existing
-  benchmark numbers are evidence. Reading code is inference. Label each
-  finding accordingly.
+- **Distinguish evidence from inference.** Compiler output is evidence of a
+  compiler decision, not its runtime cost. A representative benchmark or
+  production measurement is performance evidence. Reading code is inference.
 - **Don't demand paid wins.** Repo-wide, you have less context than the
   authors. Raise pooling and zero-copy as questions with a suggested
   measurement, not as requirements.
@@ -150,7 +155,6 @@ Clean repo: `No structural performance problems found. Benchmark coverage is
 Performance only — correctness, security, and style go to their own passes.
 Reports, applies nothing. One-shot.
 
-For a diff, use `/go-turbo-review`. To act on a finding, `/go-turbo-analyze`
-then `/go-turbo-improve`.
-
-"stop go-turbo-audit" or "normal mode" to revert.
+For a diff, use `$go-turbo-review`. To act on a finding, `$go-turbo-analyze`
+then `$go-turbo-improve`.
+Task-scoped.

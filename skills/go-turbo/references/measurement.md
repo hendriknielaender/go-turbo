@@ -1,367 +1,368 @@
 # Measurement
 
-An optimization without a measurement is a guess with extra steps. This file
-is the part of the skill that keeps the rest honest.
+Measure the decision the code change is meant to support. A benchmark answers
+how one isolated operation behaves under stated conditions; a profile explains
+where a running program spends a sampled resource; a load test shows how a
+system behaves as demand changes. Do not substitute one for another.
 
 ## Contents
 
-- [Writing a benchmark that measures the right thing](#writing-a-benchmark-that-measures-the-right-thing)
-- [Running benchmarks](#running-benchmarks)
-- [benchstat](#benchstat)
-- [Controlling variance](#controlling-variance)
-- [pprof](#pprof)
-- [Reading a CPU profile](#reading-a-cpu-profile)
-- [Memory profiles](#memory-profiles)
-- [Block and mutex profiles](#block-and-mutex-profiles)
-- [Execution traces](#execution-traces)
-- [Load testing](#load-testing)
-- [What benchmarks don't tell you](#what-benchmarks-dont-tell-you)
+- [Define the question](#define-the-question)
+- [Build trustworthy benchmarks](#build-trustworthy-benchmarks)
+- [Model inputs and state](#model-inputs-and-state)
+- [Run comparisons](#run-comparisons)
+- [Control and report variance](#control-and-report-variance)
+- [Use pprof](#use-pprof)
+- [Read CPU and memory profiles](#read-cpu-and-memory-profiles)
+- [Measure blocking and scheduling](#measure-blocking-and-scheduling)
+- [Load-test systems](#load-test-systems)
+- [Make defensible claims](#make-defensible-claims)
 
-## Writing a benchmark that measures the right thing
+## Define the question
+
+Write down the target before selecting a tool:
+
+- latency: p50, p95, p99, or maximum at a stated offered load;
+- throughput: operations or bytes per second within a latency/error budget;
+- CPU: cores or CPU-seconds per unit of useful work;
+- allocation: bytes and objects per operation, plus allocation rate;
+- memory: steady live set, peak resident set, or retained objects;
+- concurrency: queue delay, blocked time, lock wait, scheduler delay, or leaks;
+- startup and binary size: cold process measurements, not a warmed benchmark.
+
+Also name the production dimensions that can change the result: Go version,
+GOOS/GOARCH, CPU, core quota, input sizes, hit ratio, concurrency, transport,
+TLS state, cache state, and downstream latency. If those are unknown, label the
+result exploratory.
+
+## Build trustworthy benchmarks
+
+Use `b.Loop` on Go 1.24 and later. Setup before its first call and cleanup after
+it returns are excluded automatically, and the compiler keeps work inside the
+loop observable.
 
 ```go
 func BenchmarkParse(b *testing.B) {
-    input := loadTestData()   // setup outside the timed region
-    b.ReportAllocs()
-    b.ResetTimer()
+	input := makeInput(64 << 10)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(input)))
 
-    for b.Loop() {            // Go 1.24+
-        _ = Parse(input)
-    }
+	for b.Loop() {
+		result, err := Parse(input)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = result
+	}
 }
 ```
 
-`b.Loop()` (Go 1.24+) is the current idiom and fixes two long-standing traps
-at once: the loop body's results are kept alive so the compiler can't
-eliminate them, and setup before the loop isn't timed. On older versions,
-`for i := 0; i < b.N; i++` plus a package-level sink:
+For older toolchains, use `b.N` and publish the final result to a package-level
+sink. Do not mix `b.Loop` and `b.N` in one benchmark.
 
 ```go
-var sink Result
+var parseSink Result
 
-func BenchmarkParse(b *testing.B) {
-    input := loadTestData()
-    b.ReportAllocs()
-    b.ResetTimer()
+func BenchmarkParseLegacy(b *testing.B) {
+	input := makeInput(64 << 10)
+	b.ReportAllocs()
+	b.ResetTimer()
 
-    var r Result
-    for i := 0; i < b.N; i++ {
-        r = Parse(input)
-    }
-    sink = r    // keeps the work observable
+	var result Result
+	for i := 0; i < b.N; i++ {
+		result, _ = Parse(input)
+	}
+	parseSink = result
 }
 ```
 
-**The four ways benchmarks lie:**
+Check these failure modes:
 
-1. **Dead code elimination.** An unused result can be deleted entirely,
-   giving you a benchmark of an empty loop. Symptom: sub-nanosecond `ns/op`.
-2. **Setup inside the timed region.** Allocating test data per iteration
-   measures your allocator, not your function. Use `b.ResetTimer()`, or
-   `b.StopTimer()`/`b.StartTimer()` around per-iteration setup (which is
-   slow — prefer restructuring).
-3. **Unrepresentative input.** A parser benchmarked on a 40-byte document
-   tells you about function call overhead. Benchmark the size distribution
-   you actually see, as sub-benchmarks:
+- **Eliminated work:** implausibly tiny timings often mean the result was not
+  observable. Keep outputs and externally visible mutations alive.
+- **Timed setup:** building fixtures, opening connections, or generating random
+  data inside the loop measures setup. Move it out unless setup is the target.
+- **Accumulating state:** appending forever, filling a map, or advancing a reader
+  makes every iteration different. Reset state deliberately.
+- **Hidden setup cost:** pooling or reusing an object outside the loop measures a
+  warm path. Include a separate cold benchmark if initialization matters.
+- **Error-path drift:** ignoring errors can turn later iterations into a cheap
+  failure path. Check errors inside the loop when they are possible.
+- **Global contention:** benchmarks running in parallel may share package state.
+  Make that intentional or isolate it.
+
+Report allocation in every performance benchmark. For a focused allocation
+contract, `testing.AllocsPerRun` can assert a stable ceiling, but avoid brittle
+exact counts around compiler-dependent code unless that count is the API's goal.
+
+Use `b.SetBytes` for byte-oriented work so output includes throughput. Use
+`b.ReportMetric` for domain units that make the result interpretable:
 
 ```go
-for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
-    b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) { ... })
+func BenchmarkBatch(b *testing.B) {
+	const records = 500
+	b.ReportAllocs()
+	for b.Loop() {
+		consume(records)
+	}
+	b.ReportMetric(records, "records/op")
 }
 ```
 
-4. **Warm caches and zero contention.** A single-goroutine benchmark of a
-   mutex-protected structure shows the uncontended fast path, which is not
-   the case you were worried about. Use `b.RunParallel` for concurrent
-   behavior:
+## Model inputs and state
+
+Benchmark the distribution, not a convenient specimen. Use sub-benchmarks for
+sizes and shapes that cross meaningful boundaries:
+
+```go
+func BenchmarkLookup(b *testing.B) {
+	for _, size := range []int{8, 128, 4096} {
+		b.Run(fmt.Sprintf("n=%d", size), func(b *testing.B) {
+			index, keys := buildIndex(size)
+			b.ReportAllocs()
+			for b.Loop() {
+				_, _ = index[keys[size/2]]
+			}
+		})
+	}
+}
+```
+
+Cover, when relevant:
+
+- success, miss, malformed, and worst-valid inputs;
+- small, median, high-percentile, and maximum accepted sizes;
+- empty, sparse, dense, sorted, and adversarial distributions;
+- warm and cold caches, pools, connections, TLS sessions, and DNS state;
+- uncontended and representative contended access;
+- single-operation latency and sustained batches;
+- the actual protocol negotiated, not merely the requested protocol.
+
+Use deterministic fixtures. Seed a private pseudo-random generator with a fixed
+value and record it; do not use global nondeterminism or map iteration order as
+input generation. Keep a separate fuzz/property test for correctness diversity.
+
+For synchronization code, use `RunParallel` and vary parallelism. An
+uncontended mutex benchmark cannot answer a contention question.
 
 ```go
 func BenchmarkCacheParallel(b *testing.B) {
-    c := New()
-    b.RunParallel(func(pb *testing.PB) {
-        for pb.Next() {
-            c.Get("key")
-        }
-    })
+	cache := newCache()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _ = cache.Get("hot-key")
+		}
+	})
 }
 ```
 
-Always `b.ReportAllocs()`. B/op and allocs/op are far more stable than ns/op
-and usually explain it.
+## Run comparisons
 
-## Running benchmarks
-
-```sh
-go test -bench=. -benchmem -run=^$ ./...
-go test -bench=BenchmarkParse -benchmem -count=10 -run=^$ ./pkg
-go test -bench=. -benchtime=5s ./pkg          # longer per-benchmark run
-go test -bench=. -benchtime=1000x ./pkg       # fixed iteration count
-```
-
-- `-run=^$` skips tests so their time and side effects don't pollute the run.
-- `-count=10` is not optional if you intend to compare. One run is a sample
-  of size one.
-- `-benchtime=5s` helps very fast benchmarks accumulate enough iterations to
-  stabilize.
-
-Capture profiles from the same run:
+Run behavior tests before timing. Then capture multiple samples from the same
+machine and session:
 
 ```sh
-go test -bench=BenchmarkParse -cpuprofile=cpu.out -memprofile=mem.out ./pkg
-go tool pprof -http=:8080 cpu.out
-```
-
-## benchstat
-
-Never compare two raw benchmark outputs by eye. `benchstat` does the
-statistics.
-
-```sh
-go install golang.org/x/perf/cmd/benchstat@latest
-
-go test -bench=. -benchmem -count=10 -run=^$ ./pkg > old.txt
-# ... make the change ...
-go test -bench=. -benchmem -count=10 -run=^$ ./pkg > new.txt
-
+go test ./...
+go test -run='^$' -bench='BenchmarkParse$' -benchmem -count=10 ./pkg > old.txt
+# apply one coherent change
+go test -run='^$' -bench='BenchmarkParse$' -benchmem -count=10 ./pkg > new.txt
 benchstat old.txt new.txt
 ```
 
-```
-                │   old.txt   │              new.txt               │
-                │   sec/op    │   sec/op     vs base               │
-Parse/size=1024   1.842µ ± 2%   1.203µ ± 1%  -34.69% (p=0.000 n=10)
+Use an anchored benchmark regexp when the package has unrelated expensive
+benchmarks. Increase `-benchtime` when each sample is too short to stabilize:
 
-                │   old.txt    │              new.txt               │
-                │     B/op     │     B/op      vs base              │
-Parse/size=1024   4.125Ki ± 0%   0.000Ki ± 0%  -100.00% (p=0.000 n=10)
+```sh
+go test -run='^$' -bench='BenchmarkParse$' -benchmem -count=10 -benchtime=3s ./pkg
 ```
 
-Read `p` and `±`, not just the percentage. `p ≥ 0.05` or `~` in the delta
-column means the difference is not statistically distinguishable from noise —
-report that as "no measurable change," not as a win. A `±` above about 5%
-means the benchmark is too noisy to trust small deltas; fix the noise before
-believing the number.
+Read the distribution and statistical result, not only the percent delta. A
+result marked statistically indistinguishable is no measured change. If the
+new implementation is more complex, revert it unless another measured metric
+justifies the trade.
 
-## Controlling variance
+Do not require allocation movement for a CPU improvement. A better algorithm,
+fewer comparisons, vectorized library code, or reduced contention can improve
+time while `B/op` and `allocs/op` remain identical.
 
-Modern hardware is actively hostile to benchmarking. Clock frequency scales
-with load and temperature, the OS migrates threads between cores, and other
-processes compete for cache. Two identical runs can differ by 5–30% with no
-controls.
+Profile one representative benchmark run separately from the sample set:
 
-In rough order of value:
+```sh
+go test -run='^$' -bench='BenchmarkParse$' -benchtime=10s \
+  -cpuprofile=cpu.out -memprofile=mem.out ./pkg
+go tool pprof -http=:0 cpu.out
+```
 
-1. **Close everything else.** Browsers and IDEs are the biggest source of
-   noise on a dev machine.
-2. **Increase `-count` and let `benchstat` handle it.** More samples beats
-   most environmental fixes and costs nothing but time.
-3. **Pin CPU frequency** (Linux): set the governor to `performance`, and
-   disable turbo boost — turbo gives brief unsustainable spikes, so a
-   benchmark that catches a turbo window looks faster than one that runs
-   after thermal throttling.
-4. **Pin to cores.** `taskset -c 2,3` avoids core 0 (which handles
-   interrupts) and prevents mid-run migration.
-5. **Run on a quiet, dedicated machine.** Shared CI runners are the worst
-   case: noisy neighbors, unknown CPU models, aggressive throttling. CI
-   benchmark numbers are useful for catching order-of-magnitude regressions
-   and nothing finer.
+## Control and report variance
 
-A useful discipline for tracked benchmarks: compute the coefficient of
-variation (stddev/mean) per benchmark and label anything above ~15% as
-unstable rather than deleting it. Knowing a benchmark is inherently noisy is
-information; silently comparing against it is a mistake.
+Use the cheapest effective controls first:
 
-Run both the old and new versions in the same session on the same machine.
-Comparing today's numbers against last month's on a different host measures
-the hosts.
+1. Run old and new code on the same host, power mode, Go version, and session.
+2. Close noisy applications and allow the machine to reach a stable temperature.
+3. Collect enough independent samples and compare them statistically.
+4. Warm code/data only when the production question is warm; otherwise preserve
+   a cold case and document how it is reset.
+5. On dedicated Linux benchmark hosts, pin the governor and CPU set when small
+   deltas matter. Record those controls; do not silently apply host-wide tuning.
+6. Use dedicated runners for regression thresholds. Shared CI is suitable for
+   large regressions unless its variance has been characterized.
 
-## pprof
+Record at least:
 
-For a service, expose the endpoints:
+```text
+commit, dirty state, Go version, GOOS/GOARCH, CPU model, GOMAXPROCS,
+benchmark command, input/seed, sample count, benchtime, and relevant env knobs
+```
+
+Track per-benchmark coefficient of variation when maintaining a long-lived
+suite. Classify noisy tests instead of deleting inconvenient samples. Re-run
+only under a documented policy; repeatedly rerunning until a preferred result
+appears is selection bias.
+
+For release-to-release comparisons, follow
+`toolchain-upgrades.md`; run every version on the same hardware and treat the
+least stable version as the confidence limit for that benchmark.
+
+## Use pprof
+
+For a service, expose profiles on a separately protected listener. Never expose
+them directly to untrusted networks; profiles and handlers can reveal sensitive
+data and consume substantial resources.
 
 ```go
-import _ "net/http/pprof"
+import (
+	"log"
+	"net/http"
+	_ "net/http/pprof"
+)
 
-go func() {
-    log.Println(http.ListenAndServe("localhost:6060", nil))
-}()
+func serveProfiles() {
+	server := &http.Server{
+		Addr:              "127.0.0.1:6060",
+		ReadHeaderTimeout: 2 * time.Second,
+	}
+	log.Print(server.ListenAndServe())
+}
 ```
 
-Bind to localhost or put it behind auth — these endpoints expose memory
-contents and can be used to stall a process.
+Capture under the workload that exhibits the problem:
 
 ```sh
-go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30   # CPU
-go tool pprof http://localhost:6060/debug/pprof/heap                 # live heap
-go tool pprof http://localhost:6060/debug/pprof/allocs               # all allocs
-go tool pprof http://localhost:6060/debug/pprof/goroutine            # stacks
-go tool pprof http://localhost:6060/debug/pprof/block                # blocking
-go tool pprof http://localhost:6060/debug/pprof/mutex                # contention
+curl -o cpu.out 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'
+curl -o heap.out 'http://127.0.0.1:6060/debug/pprof/heap'
+curl -o allocs.out 'http://127.0.0.1:6060/debug/pprof/allocs'
+go tool pprof -http=:0 cpu.out
 ```
 
-**Profile under load.** A profile of an idle service shows you the idle
-loop. Generate representative traffic, then capture.
-
-The web UI is where the useful views are:
+Use profile differences when the baseline is meaningful:
 
 ```sh
-go tool pprof -http=:8080 cpu.out
+go tool pprof -base=before.out after.out
 ```
 
-Top / Graph / **Flame Graph** / Peek / Source. Flame graph first: width is
-time, and the widest plateau is where your time is.
+Sampling changes what can be seen. Short profiles miss rare work; heap sampling
+can underrepresent small allocations. Increase duration or sampling only with a
+clear need and account for overhead.
 
-Comparing profiles is underused and excellent:
+## Read CPU and memory profiles
 
-```sh
-go tool pprof -http=:8080 -base=before.out after.out
-```
+In CPU profiles, **flat** time is time attributed to a function itself;
+**cumulative** time includes callees. Descend from high-cumulative/low-flat
+callers before naming the bottleneck.
 
-## Reading a CPU profile
+Common clues are starting points, not conclusions:
 
-Distinguish **flat** (time in this function's own instructions) from
-**cumulative** (including everything it calls). A high-cumulative,
-low-flat function is a router, not a bottleneck — descend into it.
+- allocator and GC frames: inspect their callers and an allocation profile;
+- `runtime.growslice`: check capacity knowledge and append volume;
+- map hashing/access: reduce lookups or reconsider the key/index;
+- copying/memory movement: inspect conversions, growth, and ownership transfers;
+- syscall frames: measure operation size and boundary frequency;
+- semaphore/lock frames: use mutex and block profiles;
+- stack growth: inspect recursion, large frames, and goroutine lifetime.
 
-What the common patterns mean in a Go service:
+Use allocation and heap profiles for different questions:
 
-- **`runtime.mallocgc` high** — allocation-bound. Go to
-  `references/allocation.md`; the callers list tells you where.
-- **`runtime.gcBgMarkWorker`, `gcDrain`, `scanobject` high** — GC-bound,
-  which is the same problem one step later. Fix allocation, not `GOGC`.
-- **`runtime.mapaccess`/`mapassign` high** — hashing dominates. Consider a
-  slice with linear scan for small n, a better key type (string hashing is
-  not free), or fewer lookups.
-- **`syscall.Syscall` / `runtime.read` high** — I/O-bound. Buffer or batch;
-  see `references/io-and-syscalls.md`.
-- **`runtime.futex`, `lock2`, `semacquire` high** — lock contention. Go to
-  the mutex profile; see `references/concurrency.md`.
-- **`runtime.growslice` high** — missing preallocation.
-- **`runtime.convT*`** — interface boxing.
-- **`runtime.memmove` high** — copying. Look for unnecessary
-  `[]byte`↔`string` conversions or slice copies.
-- **`runtime.morestack` high** — deep call chains repeatedly growing
-  goroutine stacks. Usually recursion or a very large stack frame in a hot
-  goroutine.
-- **`gcWriteBarrier` visible** — many pointer writes; sometimes fixable by
-  storing indices instead of pointers in a hot structure.
+- `allocs`: cumulative churn; identify what drives allocation rate and GC work;
+- `heap`: live objects at capture; identify retention and live-set growth.
 
-## Memory profiles
+For a leak, capture two heap profiles after comparable warmup and offered load,
+then diff them. Profiles attribute bytes to allocation sites, not to the code
+that later retained the object; follow ownership from the allocation.
 
-Two different questions, two different endpoints:
+## Measure blocking and scheduling
 
-- **`/debug/pprof/allocs`** — cumulative allocation since start. Answers
-  "what is driving GC?" Use `-sample_index=alloc_objects` to rank by count
-  rather than bytes; many small allocations often cost more than a few big
-  ones.
-- **`/debug/pprof/heap`** — live objects at the moment of sampling. Answers
-  "what is holding memory?" This is the leak-hunting profile.
-
-For leaks, take two heap profiles minutes apart under steady load and diff:
-
-```sh
-go tool pprof -http=:8080 -base=heap1.out heap2.out
-```
-
-Anything growing is your suspect. Remember that `pprof` attributes memory to
-the *allocation site*, so a retained sub-slice shows up under whoever
-allocated the big buffer, not under whoever is holding it — see the
-retained-backing-array trap in `references/allocation.md`.
-
-Heap profiling samples (roughly one per 512 KB by default;
-`runtime.MemProfileRate` adjusts it). Small, frequent allocations may be
-under-represented in a short window.
-
-## Block and mutex profiles
-
-Off by default because they cost something. Enable with sampling:
+Enable synchronization profiles deliberately because they add overhead:
 
 ```go
-runtime.SetBlockProfileRate(10_000)   // ~1 sample per 10µs blocked
-runtime.SetMutexProfileFraction(100)  // ~1 in 100 contention events
+runtime.SetBlockProfileRate(10_000)
+runtime.SetMutexProfileFraction(100)
 ```
 
-- **Block profile** — where goroutines wait: channel operations, mutex
-  acquisition, network I/O, `WaitGroup.Wait`. This is where latency hides
-  that a CPU profile cannot show, because a blocked goroutine uses no CPU.
-- **Mutex profile** — specifically lock contention, attributed to the
-  *holder* of the lock. That's the function to shorten or shard.
+- The block profile samples time waiting on synchronization primitives such as
+  channels, mutexes, and `select`. Do not treat it as a complete network-I/O
+  latency profile.
+- The mutex profile attributes contention to lock holders; shorten, move, or
+  shard the measured critical section rather than optimizing a waiter.
+- The goroutine profile shows current stacks and is useful for growth/leak
+  comparisons.
 
-A service with low CPU utilization and bad p99 latency is a block-profile
-problem, not a CPU-profile problem.
-
-## Execution traces
+Use an execution trace for scheduler delay, network blocking, syscalls, GC
+phases, and cross-goroutine causality:
 
 ```sh
-curl -o trace.out 'http://localhost:6060/debug/pprof/trace?seconds=5'
+curl -o trace.out 'http://127.0.0.1:6060/debug/pprof/trace?seconds=5'
 go tool trace trace.out
 ```
 
-The trace shows what no profile can: scheduler latency (time between a
-goroutine becoming runnable and actually running), GC phases against the
-timeline, per-goroutine blocking, and syscall duration.
+Keep traces short. Use them when low CPU coexists with bad tail latency, when
+goroutines remain runnable but unscheduled, or when a profile cannot explain a
+timeline spike.
 
-Use it when the question is "why is p99 bad when the CPU is idle" or "what is
-happening during these latency spikes." Keep the window short — traces are
-large and analysis gets unwieldy past a few seconds.
+## Load-test systems
 
-The "Goroutine analysis" and "Synchronization blocking profile" views are the
-fastest paths to an answer for most services.
+Choose the generator by the question:
 
-## Load testing
+- use an open-loop fixed-rate generator for latency at a known offered load;
+- use a closed-loop/high-throughput generator to find a saturation ceiling;
+- use scripted scenarios for realistic multi-step behavior;
+- use protocol-specific tools for raw TCP, HTTP/2, gRPC, or QUIC and assert the
+  protocol actually negotiated.
 
-Benchmarks measure functions; load tests measure systems. Both are necessary
-and neither substitutes for the other.
+Closed-loop clients pause submissions while the service is slow and can hide
+the requests that would have arrived during the stall. Call out coordinated
+omission whenever reporting latency from such a test.
 
-- **`wrk`** — maximum throughput from a fixed connection count. Best for
-  "how fast can this get."
-- **`vegeta`** — a *fixed request rate*, which is what you want for latency
-  measurement. Open-loop generation avoids coordinated omission, where a
-  closed-loop client stops sending during a stall and never records how bad
-  it was.
-- **`k6`** — scripted, multi-step user flows with ramping stages. Best for
-  realistic behavior and CI thresholds.
+Test a rate curve rather than one point: below expected load, at target, near
+saturation, and beyond saturation. Report offered rate, achieved throughput,
+errors/rejections, p50/p95/p99/max latency, CPU, memory, GC, queue depth, open
+connections, and downstream saturation.
 
-```sh
-echo "GET http://localhost:8080/api/items" > targets.txt
-vegeta attack -rate=500 -duration=60s -targets=targets.txt \
-  | tee results.bin | vegeta report
-vegeta report -type='hist[0,10ms,50ms,100ms,500ms,1s]' < results.bin
-```
+Separate warm and cold connection-pool/TLS-session tests. For high connection
+churn, watch the load generator's file descriptors, CPU, ephemeral ports, and
+`TIME_WAIT`; a saturated generator can make a healthy server appear slow.
 
-Report percentiles, not averages. The mean latency of a service with a 5%
-tail at 2 seconds looks fine and is not. p50, p95, p99, and max, at a stated
-request rate.
+Capture profiles during the steady portion of the load test, not during idle
+startup or uncontrolled ramp-up.
 
-Capture a CPU profile *while the load test runs* — that's the profile that
-reflects reality.
+## Make defensible claims
 
-## What benchmarks don't tell you
+A complete claim names:
 
-Worth stating plainly, because it's the difference between using numbers well
-and being misled by them.
+1. what changed;
+2. the metric and direction;
+3. the workload/input distribution;
+4. baseline and candidate numbers, including allocation metrics;
+5. sample count and comparison method;
+6. Go version, platform, and relevant configuration;
+7. whether the evidence is isolated or end-to-end;
+8. correctness and race checks;
+9. remaining production or platform gates.
 
-A microbenchmark runs one function in a tight loop with warm caches, no
-competing goroutines, no GC pressure from adjacent subsystems, no network
-jitter, and a fixed input. Your production service runs hundreds of
-goroutines, GCs mid-request, and sees inputs varying by orders of magnitude.
+Prefer: “The focused parser benchmark on 64 KiB inputs used 1 fewer alloc/op
+and 18% less time across 10 samples on linux/arm64.”
 
-The benchmark tells you how that function behaves in isolation. That is
-genuinely useful — it's how you know a change helped rather than hurt — and
-it is not the same as knowing your service got faster.
+Reject: “The service is 18% faster.”
 
-Specific gaps to keep in mind:
-
-- **CPU model matters.** Crypto, SIMD-eligible loops, and cache-sensitive
-  code behave differently across Intel, AMD, and ARM. A result from one
-  microarchitecture doesn't transfer.
-- **Core count matters.** GC pause distribution and scheduler contention at
-  4 cores say little about 64.
-- **Loopback isn't a network.** Networking benchmarks over localhost measure
-  Go's stack, not end-to-end behavior.
-- **A 3% benchmark delta is usually noise.** A 15% delta with a low `p` and
-  tight `±` is a signal. Know which one you have before shipping a claim.
-
-The honest form of a performance claim names its conditions: "30% fewer
-allocations per request on this benchmark with this input distribution,
-measured with `benchstat` over 10 runs" — not "30% faster."
+When measurement is unavailable, state the mechanism as a hypothesis and give
+the exact benchmark, profile, or load test needed to decide. That is an honest
+result, not an incomplete one.

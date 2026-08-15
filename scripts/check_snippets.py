@@ -11,8 +11,9 @@ Several wrapping strategies are tried in order, because a fragment may be a
 whole file, a set of top-level declarations, a run of statements, or a mix of
 declarations and statements. A block is a failure only if none of them parse.
 
-Blocks that are deliberately incomplete (elided with `...` or `…`) are skipped,
-as is any block preceded by an HTML comment containing `check-snippets: skip`.
+Blocks that are deliberately incomplete must be preceded by an HTML comment
+containing `check-snippets: skip`. Valid Go uses `...` in variadic syntax, so
+ellipsis text is not an automatic exemption.
 """
 
 from __future__ import annotations
@@ -115,10 +116,6 @@ def main() -> int:
             if SKIP_MARK in preceding:
                 skipped += 1
                 continue
-            if "..." in body or "…" in body:
-                skipped += 1
-                continue
-
             checked += 1
             last_err = "parse error"
             for candidate in candidates(body):

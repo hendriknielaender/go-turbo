@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Turbo Help"
+  short_description: "Show the Go Turbo workflows and evidence rules"
+  default_prompt: "Use $go-turbo-help to show the available Go Turbo workflows and evidence rules."
+policy:
+  allow_implicit_invocation: false

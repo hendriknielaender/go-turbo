@@ -2,20 +2,19 @@
 name: go-turbo-improve
 description: >
   Apply performance fixes to existing Go code and prove they worked. Takes a
-  diagnosis (from /go-turbo-analyze, a profile, or the user's own finding),
+  diagnosis (from $go-turbo-analyze, a profile, or the user's own finding),
   makes the smallest change that addresses it, and benchmarks before and
   after with benchstat. Use when the user says "make this faster", "optimize
   this", "reduce the allocations here", "fix this bottleneck", "speed up this
-  function", "apply the fix", "/go-turbo-improve", or hands over a slow
+  function", "apply the fix", "$go-turbo-improve", or hands over a slow
   function and asks for a faster version. Preserves behavior exactly —
   optimization, not redesign.
-license: MIT
 ---
 
 # go-turbo-improve
 
 Apply the fix, keep the behavior, prove the win. This is the execution half
-of `/go-turbo-analyze`.
+of `$go-turbo-analyze`.
 
 The discipline that makes this skill trustworthy: an optimization that
 changes behavior is a bug, and an optimization without a measurement is a
@@ -25,20 +24,21 @@ faster."
 ## Procedure
 
 **1. Know what you're fixing.** If a diagnosis exists — from
-`/go-turbo-analyze`, a profile, or the user — work from it. If not, spend the
+`$go-turbo-analyze`, a profile, or the user — work from it. If not, spend the
 first step finding the bottleneck rather than optimizing the first thing you
 see. Optimizing the wrong function is pure cost.
 
 **2. Baseline first.** Before touching anything:
 
 ```sh
-go test ./... > /dev/null                                     # green?
-go test -bench=<target> -benchmem -count=10 -run=^$ ./pkg > old.txt
+go test ./...
+go test -bench='BenchmarkTarget$' -benchmem -count=10 -run='^$' ./pkg > old.txt
 ```
 
-If no benchmark exists, write one for the target function first. It is the
-only way to know afterward whether you helped, and it stays in the repo as a
-regression guard. A benchmark you skip is a change you can't defend.
+If no suitable measurement exists, add the smallest one that answers the
+question: a focused benchmark for local code, or a trace/load test for a
+queueing, network, or system effect. A microbenchmark is not the only valid
+evidence and must not be used to claim an end-to-end win.
 
 **3. Fix the highest rung that applies.** Work down the go-turbo ladder:
 redundant work → algorithm → allocation → escape → boundary crossings →
@@ -73,31 +73,32 @@ func FuzzSameAsOld(f *testing.F) {
 **6. Measure and compare.**
 
 ```sh
-go test -bench=<target> -benchmem -count=10 -run=^$ ./pkg > new.txt
+go test -bench='BenchmarkTarget$' -benchmem -count=10 -run='^$' ./pkg > new.txt
 benchstat old.txt new.txt
 ```
 
-**7. Report the number, whatever it says.** If `benchstat` shows `~` or
-`p ≥ 0.05`, the change did not measurably help — revert it. Shipping added
-complexity for an unmeasurable win is exactly what this skill exists to
-prevent, and reverting is the professional outcome, not a failure.
+**7. Report the number, whatever it says.** If the comparison cannot
+distinguish a benefit, revert complexity introduced solely for speed. A
+simple behavior-preserving cleanup or algorithmic correction may remain for
+non-performance reasons, but do not claim it is faster without evidence.
 
 ## Rules
 
 - **Behavior is frozen.** Same outputs, same errors, same edge cases, same
   API. Behavior changes are a separate conversation with the user, not
   something to slip into a perf commit.
-- **Free wins need no permission.** Preallocation with known size,
-  `strings.Builder`, buffered I/O, field reordering, hoisted allocations —
-  apply them and move on.
+- **Baseline improvements need established preconditions.** Capacity must be
+  defensible; buffering needs flush/error behavior; field layout may be
+  externally observable; reuse needs an ownership contract. Apply the simple
+  change when those conditions are clear, and do not invent a speedup.
 - **Paid wins need evidence and a comment.** `sync.Pool`, zero-copy sharing,
-  lock-free structures, `unsafe`, GC tuning. Each ships with a benchmark and
-  a `turbo:` comment naming what was traded:
+  lock-free structures, `unsafe`, GC tuning. Each ships with the representative
+  measurement and a `turbo:` comment naming what was traded:
 
 ```go
-// turbo: pooled decode buffers; the returned slice aliases the pool buffer
-// and is invalid after the next Decode. Drop the pool if allocation stops
-// showing in profiles.
+// turbo: pools internal decode scratch after BenchmarkDecode removed 1 alloc/op.
+// Decode copies caller-owned output; pooled bytes never escape this function.
+// Drop the pool if scratch allocation stops appearing in production profiles.
 ```
 
 - **`-race` is not optional** for concurrency changes. A data race is not a
@@ -106,8 +107,9 @@ prevent, and reverting is the professional outcome, not a failure.
   changes usually cost more in readability than they return in speed. Say
   where you stopped and what's next, rather than grinding through diminishing
   returns.
-- **Don't reach for `unsafe` unless the user asked or the level is
-  `redline`.** And then only with a benchmark in the same response.
+- **User interest is not evidence for `unsafe`.** Even at `redline`, require a
+  measured bottleneck, a portable fallback when appropriate, focused tests,
+  and a benchmark on every supported architecture.
 
 ## Output
 
@@ -130,9 +132,10 @@ useful information, and it stops someone else from trying the same thing.
 
 Optimizes existing code. Does not redesign architecture, add dependencies
 without asking, or change public APIs. For a fresh implementation, use
-`/go-turbo` directly; for diagnosis without changes, `/go-turbo-analyze`.
+`$go-turbo` directly; for diagnosis without changes, `$go-turbo-analyze`.
 
-Load the relevant `references/*.md` from the `go-turbo` skill for the pattern
-being applied, and `references/measurement.md` for benchmark hygiene.
-
-"stop go-turbo-improve" or "normal mode" to revert.
+When the core skill is installed alongside this one, use `$go-turbo`'s routing
+table for the complete pattern reference and load the
+[measurement reference](../go-turbo/references/measurement.md) for benchmark
+hygiene. This workflow remains usable without those optional references.
+Task-scoped.

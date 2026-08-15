@@ -1,102 +1,91 @@
 ---
 name: go-turbo-help
 description: >
-  Quick-reference card for all go-turbo modes, skills, and commands.
-  One-shot display, not a persistent mode. Trigger: /go-turbo-help,
-  "go-turbo help", "what go-turbo commands", "how do I use go-turbo",
-  "go turbo cheatsheet".
-license: MIT
+  Show the go-turbo skill family, its performance ladder, evidence rules,
+  and common Go measurement commands. Use when the user invokes
+  $go-turbo-help or asks how to use the go-turbo Go performance skills.
 ---
 
-# go-turbo Help
+# Go Turbo Help
 
-Display this card when invoked. One-shot: do NOT change mode, write files, or
-persist anything.
-
-## Levels
-
-| Level | Trigger | What changes |
-|-------|---------|--------------|
-| **cruise** | `/go-turbo cruise` | Clean idiomatic Go. Free wins applied silently, paid wins named in one line for the user to choose. Nothing restructured. |
-| **turbo** | `/go-turbo` | The ladder enforced. Hot paths checked for allocation and escape; paid wins applied where evidence supports them. Default. |
-| **redline** | `/go-turbo redline` | Every hot-path allocation is a defect. `unsafe`, manual layout, syscall tuning, lock-free structures on the table — each with a benchmark in the same response. |
-
-Level sticks until changed or session end.
+Display this card. Do not inspect code, change files, or claim that a mode
+persists beyond the current task.
 
 ## Skills
 
-| Skill | Trigger | What it does |
-|-------|---------|--------------|
-| **go-turbo** | `/go-turbo` | The mode itself. Writes and reviews Go like a staff performance engineer. |
-| **go-turbo-analyze** | `/go-turbo-analyze` | Diagnose why it's slow. Ranked, evidence-backed. Changes nothing. |
-| **go-turbo-improve** | `/go-turbo-improve` | Apply the fix and prove it with `benchstat`. |
-| **go-turbo-escape** | `/go-turbo-escape` | Heap escape audit via `-gcflags=-m`, with the restructure for each. |
-| **go-turbo-bench** | `/go-turbo-bench` | Write benchmarks that measure the right thing; read them honestly. |
-| **go-turbo-review** | `/go-turbo-review` | Performance review of a diff. `L42: alloc: append into nil slice. make(…, 0, len(rows)).` |
-| **go-turbo-audit** | `/go-turbo-audit` | Whole-repo ranked performance hotlist + measurement coverage. |
-| **go-turbo-help** | `/go-turbo-help` | This card. |
+| Skill | Use it for |
+| --- | --- |
+| `$go-turbo` | Implement, refactor, debug, or review Go with performance-aware idioms. |
+| `$go-turbo-analyze` | Diagnose a latency, throughput, CPU, memory, or scaling problem without changing code. |
+| `$go-turbo-improve` | Apply a measured performance fix while preserving behavior. |
+| `$go-turbo-escape` | Explain and reduce relevant heap escapes. |
+| `$go-turbo-bench` | Design, run, and interpret trustworthy Go benchmarks. |
+| `$go-turbo-review` | Review a diff for performance risks and unjustified complexity. |
+| `$go-turbo-audit` | Produce a ranked, whole-repository performance assessment. |
+| `$go-turbo-help` | Show this card. |
 
-Typical flow: `/go-turbo-analyze` → `/go-turbo-improve` → `/go-turbo-bench`.
+Each invocation is task-scoped. The primary `$go-turbo` skill can also be
+selected automatically for Go implementation and performance work when the
+host supports implicit skill selection.
 
-## The ladder
+## Decision ladder
 
-Work top-down; stop when the cost stops justifying the complexity.
+Work from the highest-leverage question downward and stop when further
+complexity is not justified:
 
-1. Does the work need to happen at all?
-2. Is the algorithm and data structure right?
-3. Does it allocate on the hot path?
-4. Does it escape when it doesn't have to?
-5. Does it cross an expensive boundary per item?
-6. Does it contend?
-7. Only then: layout, false sharing, inlining, `unsafe`, SIMD.
+1. Can the work be removed, cached, deferred, or coalesced?
+2. Is the algorithm and data structure appropriate for real input sizes?
+3. Are allocations, conversions, or retained objects material?
+4. Are values escaping or keeping larger objects live unnecessarily?
+5. Are syscalls, RPCs, queries, encodes, or locks paid per item?
+6. Is concurrency bounded, cancellable, and free of measured contention?
+7. Only then consider layout, pooling, runtime tuning, `unsafe`, or
+   architecture-specific techniques.
 
-## Free wins vs paid wins
+## Evidence rule
 
-**Free** — apply while writing, no profile needed: `make` with capacity,
-`strings.Builder`, `bufio`, widest-first field order, copy before handing off
-a sub-slice, stay in `[]byte`, `sync.OnceValue`, reuse compiled regexps.
+Apply simple, semantics-preserving choices when their preconditions are
+known: exact or bounded capacity, amortized builders for repeated assembly,
+reused clients and transports, bounded concurrency, deadlines, and retained
+slice copies when ownership crosses a lifetime boundary.
 
-**Paid** — need evidence first, and a `turbo:` comment saying what was
-traded: `sync.Pool`, zero-copy sharing, lock-free structures, `unsafe`,
-manual layout, GC tuning.
+Require a representative benchmark or profile before adding lifetime,
+aliasing, portability, or maintenance risk. This includes `sync.Pool`,
+zero-copy sharing, manual padding, lock-free code, GC tuning, `unsafe`, SIMD,
+and protocol or kernel tuning. Record the workload, result, tradeoff, and
+revisit trigger next to a deliberate paid optimization.
 
-```go
-// turbo: pooled 32 KB buffers; caller must not retain past Handle().
-// Drop the pool if allocation stops showing in profiles.
-```
+Never trade race freedom, error handling, cancellation, input validation,
+or network deadlines for speed.
 
-## Commands worth memorizing
+## Measurement commands
 
 ```sh
-go test -bench=. -benchmem -count=10 -run=^$ ./pkg > old.txt
+go test -bench='BenchmarkTarget$' -benchmem -count=10 -run='^$' ./pkg > old.txt
+# make one change
+go test -bench='BenchmarkTarget$' -benchmem -count=10 -run='^$' ./pkg > new.txt
 benchstat old.txt new.txt
 
-go build -gcflags=-m ./... 2>&1 | grep -E 'escapes to heap|moved to heap'
-
-go tool pprof -http=:8080 http://localhost:6060/debug/pprof/profile?seconds=30
-go tool pprof -http=:8080 http://localhost:6060/debug/pprof/allocs
-go tool pprof -http=:8080 -base=heap1.out heap2.out
-
-GODEBUG=gctrace=1 ./service
+go test -race ./...
+go build -gcflags='-m=2' ./... 2>&1 | rg 'escapes to heap|moved to heap'
+go tool pprof -top cpu.out
+go tool pprof -top allocs.out
 go tool trace trace.out
-
-curl -o default.pgo 'http://prod:6060/debug/pprof/profile?seconds=60'  # then just build
 ```
 
-## Reference files
+Report the Go version, target, machine, workload, statistical comparison,
+`ns/op`, `B/op`, and `allocs/op`. A benchmark is not a production latency or
+capacity claim unless it models that system boundary.
 
-Under `skills/go-turbo/references/`:
+## Knowledge map
 
-`allocation.md` · `escape-analysis.md` · `gc-and-runtime.md` ·
-`concurrency.md` · `io-and-syscalls.md` · `networking.md` ·
-`measurement.md` · `compiler.md`
+The primary skill routes to focused references under
+`skills/go-turbo/references/` for data structures, allocation, escape
+analysis, GC/runtime behavior, concurrency, I/O, encoding, networking,
+protocols, resilience, measurement, compiler behavior, and toolchain
+upgrades.
 
-## Deactivate
+## Output contract
 
-Say "stop go-turbo" or "normal mode". Resume with `/go-turbo`.
-`/go-turbo off` also works.
-
-## The rule that matters
-
-No profile, no paid win. Free wins are always fair; everything else needs a
-number. Fast is a property you measure, not a style you adopt.
+For normal tasks: code or findings first, then the evidence, tradeoffs, and
+next justified rung. Say `not measured` when no valid measurement exists.

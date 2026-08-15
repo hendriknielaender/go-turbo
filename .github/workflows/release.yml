@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  workflow_call:
+
+concurrency:
+  group: release-${{ github.ref }}
+  queue: max
+
+jobs:
+  release:
+    name: Version or release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install release tooling
+        run: npm ci --ignore-scripts
+
+      - name: Verify synchronized release version
+        run: npm run check-plugin-versions
+
+      # With pending changesets this opens or updates the version pull request.
+      # On the commit that merges it there is nothing left to consume, so the
+      # publish command runs instead and reports the release through `published`.
+      # createGithubReleases stays off because this job attaches its own bundle,
+      # and because the action's release path git-pushes tags, which the
+      # credential-less checkout above cannot do.
+      - name: Version pull request or release signal
+        id: changesets
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        with:
+          version: npm run version
+          publish: npx changeset tag
+          createGithubReleases: false
+          commit: "chore: version go-turbo"
+          title: "chore: version go-turbo"
+          commitMode: github-api
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the skills-only bundle
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          contents=(.codex-plugin assets skills CHANGELOG.md LICENSE PRIVACY.md README.md TERMS.md)
+
+          # git archive writes a symlink into a zip as a regular file holding its
+          # target path, which would silently corrupt an installed skill.
+          if git ls-files -s "${contents[@]}" | awk '$1 == "120000" { print $4; found=1 } END { exit found ? 0 : 1 }'; then
+            echo "release inputs must not contain symlinks" >&2
+            exit 1
+          fi
+
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          archive="dist/go-turbo-${tag}.zip"
+          mkdir -p dist
+          git archive --format=zip --prefix=go-turbo/ --output="$archive" HEAD -- "${contents[@]}"
+          unzip -t "$archive"
+          digest="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          printf '%s  %s\n' "$digest" "$(basename "$archive")" > "${archive}.sha256"
+
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk -v heading="## ${version}" '
+            $0 == heading { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          test -s "$notes"
+
+          prerelease=()
+          case "$version" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+
+          # Creates the tag at this validated commit, publishes the release, and
+          # uploads both assets in one call.
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --notes-file "$notes" \
+            "${prerelease[@]}" \
+            "$archive" "${archive}.sha256"

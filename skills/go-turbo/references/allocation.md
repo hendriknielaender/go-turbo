@@ -1,346 +1,370 @@
 # Allocation
 
-Allocation is the dominant performance tax in most Go programs. Every heap
-object is paid for twice: once at the allocator, and again at every GC cycle
-that has to mark and sweep it. `allocs/op` is the single most useful number
-in a Go benchmark because it is nearly deterministic — it doesn't wobble with
-machine load the way `ns/op` does, and a change in it almost always explains
-a change in throughput.
+Treat heap allocation as work, not as a defect by itself. An allocation pays
+allocator cost immediately; reachable pointer-bearing objects add mark work;
+dead objects still need reclamation. Optimize allocation only on a measured
+hot path, and report `allocs/op` and `B/op` with time.
 
 ## Contents
 
-- [Preallocation](#preallocation)
-- [Slice growth](#slice-growth)
-- [String and []byte conversion](#string-and-byte-conversion)
-- [Object pooling with sync.Pool](#object-pooling-with-syncpool)
-- [Interface boxing](#interface-boxing)
-- [Struct layout and padding](#struct-layout-and-padding)
-- [False sharing](#false-sharing)
-- [Zero-copy slicing](#zero-copy-slicing)
-- [The retained-backing-array leak](#the-retained-backing-array-leak)
+- [Find the allocation first](#find-the-allocation-first)
+- [Preallocate known work](#preallocate-known-work)
+- [Let slices and maps grow when size is uncertain](#let-slices-and-maps-grow-when-size-is-uncertain)
+- [Keep text in one representation](#keep-text-in-one-representation)
+- [Build strings once](#build-strings-once)
+- [Distinguish interface conversion from heap allocation](#distinguish-interface-conversion-from-heap-allocation)
+- [Pool only proven temporary churn](#pool-only-proven-temporary-churn)
+- [Lay out dense structs deliberately](#lay-out-dense-structs-deliberately)
+- [Separate contended fields only after proving false sharing](#separate-contended-fields-only-after-proving-false-sharing)
+- [Make aliasing an ownership decision](#make-aliasing-an-ownership-decision)
+- [Break accidental backing-store retention](#break-accidental-backing-store-retention)
+- [Version compatibility](#version-compatibility)
 
-## Preallocation
+## Find the allocation first
 
-When the final size is known or boundable, give `make` the capacity. This is
-a free win: same code shape, fewer allocations, no readability cost.
+Use a benchmark to count per-operation churn and a profile to locate it:
+
+```sh
+go test ./path/to/pkg -run='^$' -bench='BenchmarkHot' -benchmem -count=10
+go tool pprof -sample_index=alloc_objects http://localhost:6060/debug/pprof/allocs
+go tool pprof -sample_index=alloc_space http://localhost:6060/debug/pprof/allocs
+```
+
+Object count finds allocator and GC churn; allocated bytes find large copies
+and buffers. The allocation profile is sampled, so confirm a proposed fix in
+the benchmark. Do not add pooling, aliasing, or `unsafe` from escape output
+alone.
+
+**Use when:** allocation appears in a representative profile or benchmark.
+**Backfires when:** the benchmark omits the retaining consumer, concurrency,
+or realistic input distribution and therefore rewards a lifetime bug.
+
+## Preallocate known work
+
+Give slices capacity when the expected result count is known or tightly
+bounded:
 
 ```go
-// Repeated reallocation and copying as the slice grows.
-var out []Result
-for _, r := range rows {
-    out = append(out, convert(r))
-}
-
-// One allocation.
-out := make([]Result, 0, len(rows))
-for _, r := range rows {
-    out = append(out, convert(r))
+func convertAll(rows []Row) []Result {
+	results := make([]Result, 0, len(rows))
+	for _, row := range rows {
+		results = append(results, convert(row))
+	}
+	return results
 }
 ```
 
-If every element gets written, index instead of appending — it skips the
-append bookkeeping entirely:
+Allocate the final length and assign by index when every output slot is
+written exactly once:
 
 ```go
-out := make([]Result, len(rows))
-for i, r := range rows {
-    out[i] = convert(r)
+func convertAll(rows []Row) []Result {
+	results := make([]Result, len(rows))
+	for i, row := range rows {
+		results[i] = convert(row)
+	}
+	return results
 }
 ```
 
-Maps take a size hint too, which pre-sizes the internal table and avoids
-incremental rehashing:
+Use a map hint for a credible entry count:
 
 ```go
-m := make(map[string]int, len(keys))
+index := make(map[string]int, len(keys))
 ```
 
-**When not to.** Preallocating a capacity you don't fill is not free — it is
-memory you hold, memory the GC scans, and cache lines you waste. If input
-sizes vary by orders of magnitude, size for the common case and let `append`
-handle the tail. Reserving the worst case "to be safe" reliably makes things
-slower, and is the single most common way C++ habits misfire in Go.
+The map argument is an initial-size hint, not a capacity contract. Its effect
+depends on key/value sizes and the current map implementation.
 
-## Slice growth
+**Use when:** the bound is cheap to obtain and close to typical occupancy.
+**Backfires when:** the bound is an adversarial or rare maximum, the result is
+usually filtered down, or `make([]T, n)` is followed by `append` and silently
+leaves `n` zero values at the front.
 
-`append` grows the backing array geometrically: doubling below a threshold of
-256 elements, then tapering toward ~25% growth for large slices. On a current
-toolchain the sequence runs `… 128 → 256 → 512 → 848 → 1280 → 1792 …` — clean
-doubling, then a smooth taper. (The exact thresholds have shifted across
-releases; the shape is stable.) This is well tuned. Without a known final
-size, hand-rolled growth strategies usually lose to it.
+## Let slices and maps grow when size is uncertain
 
-What actually costs you is the copy on each growth. For a slice that ends at
-n elements from a zero-capacity start, you allocate O(log n) times and copy
-O(n) elements total. Preallocation turns that into one allocation and zero
-copies — which is why it matters most for large slices, and barely at all for
-slices of a handful of items.
+`append` uses an implementation-defined growth policy coordinated with
+allocator size classes. Growth allocates a new backing array and copies the
+old elements only when capacity is exhausted. Do not encode current growth
+thresholds into application logic.
 
-## String and []byte conversion
-
-`[]byte(s)` and `string(b)` copy. In a hot loop, the round trip is often the
-allocation you're looking for.
+For untrusted or highly variable input, start small or cap the initial hint:
 
 ```go
-// Allocates on every iteration.
-for _, line := range lines {
-    if strings.HasPrefix(string(line), "GET ") { ... }
-}
+const initialLimit = 1024
 
-// No allocation: bytes has the same API surface.
-for _, line := range lines {
-    if bytes.HasPrefix(line, []byte("GET ")) { ... }
+hint := len(rows)
+if hint > initialLimit {
+	hint = initialLimit
 }
+results := make([]Result, 0, hint)
 ```
 
-Pick one representation and carry it end to end rather than converting at
-each layer boundary. `bytes` mirrors `strings` closely enough that staying in
-`[]byte` for I/O paths costs almost nothing in readability.
+**Use explicit capacity when:** a stable cardinality removes repeated growth
+from a hot path. **Let growth work when:** the distribution has a long tail or
+the collection is small. Manual growth can waste memory, copy more, and become
+wrong as runtime behavior changes.
 
-Conversions the compiler already elides — no workaround needed:
+## Keep text in one representation
 
-- `string(b)` used only as a map key: `m[string(b)]`
-- `string(b)` compared directly: `if string(b) == "GET"`
-- ranging over `string(b)`: `for _, r := range string(b)`
-
-Building strings:
-
-```go
-// Quadratic: each += allocates a new string and copies everything so far.
-s := ""
-for _, part := range parts {
-    s += part
-}
-
-// Linear, one or two allocations.
-var b strings.Builder
-b.Grow(estimatedSize)
-for _, part := range parts {
-    b.WriteString(part)
-}
-s := b.String()
-```
-
-`strings.Builder.String()` does not copy — it hands over the accumulated
-buffer, which is why `Builder` beats `bytes.Buffer` when the result is a
-string.
-
-## Object pooling with sync.Pool
-
-`sync.Pool` recycles objects across calls so the allocator and GC never see
-them. It works best for short-lived, uniformly-sized scratch objects on a
-genuinely hot path: request buffers, encoders, scratch slices.
+Ordinary `string(bytes)` and `[]byte(text)` conversions preserve value
+semantics by copying data. Carry `[]byte` through parsing and I/O code, or
+carry `string` through text code, instead of converting at every layer:
 
 ```go
-var bufPool = sync.Pool{
-    New: func() any { return new(bytes.Buffer) },
-}
-
-func handle(w http.ResponseWriter, r *http.Request) {
-    buf := bufPool.Get().(*bytes.Buffer)
-    buf.Reset()          // reposition; the backing array is kept
-    defer bufPool.Put(buf)
-
-    encode(buf, r)
-    w.Write(buf.Bytes())
+func isRequestLine(line []byte) bool {
+	return bytes.HasPrefix(line, []byte("GET "))
 }
 ```
 
-The win comes from `Reset()` keeping the backing array. After the pool warms
-up, `Get` returns a buffer already large enough for the workload and writes
-land in existing memory — steady-state allocation for the buffer drops to
-zero.
-
-**This is a paid win.** What you are buying it with:
-
-- **Lifetime bugs.** Anything retaining a reference after `Put` reads memory
-  that another goroutine is now writing. This is the classic `sync.Pool` bug
-  and it is a data race, not a glitch.
-- **Reset discipline.** Forget to reset and you leak the previous caller's
-  data into the next response. For anything holding user data, that is a
-  security bug, not a performance one.
-- **Unbounded retention.** Pooling variable-sized buffers keeps the largest
-  one ever seen alive indefinitely. Cap it:
+The compiler can use the byte slice transiently without a copy for a direct
+string comparison, map lookup, or map deletion:
 
 ```go
-func put(b *bytes.Buffer) {
-    if b.Cap() > 64<<10 { // don't retain outliers
-        return
-    }
-    b.Reset()
-    bufPool.Put(b)
+if string(token) == "ready" {
+	consume(token)
+}
+
+value, ok := table[string(token)]
+delete(table, string(token))
+```
+
+That is a compiler optimization, not permission to retain mutable bytes as a
+string. A map insertion must preserve the key after the byte slice changes,
+so this conversion copies:
+
+```go
+table[string(token)] = value
+```
+
+Do not replace safe conversions with `unsafe.String` or `unsafe.Slice` unless
+a profile proves the copy matters and the API can enforce immutability and
+lifetime. A single mutation, append, pool return, or early reclamation can
+turn the optimization into corrupted keys, races, or dangling data.
+
+**Use one representation when:** adjacent layers already accept it and the
+ownership contract stays simple. **Backfires when:** forcing `[]byte` through
+text-oriented APIs spreads mutable aliasing, or conversion avoidance couples
+otherwise clean package boundaries. Recheck on the deployed toolchain; these
+elisions are not language guarantees.
+
+## Build strings once
+
+Repeated `+=` in a loop repeatedly copies the prefix. Use a builder and grow
+it from a realistic size estimate:
+
+```go
+func join(parts []string, estimate int) string {
+	var b strings.Builder
+	if estimate > 0 {
+		b.Grow(estimate)
+	}
+	for _, part := range parts {
+		b.WriteString(part)
+	}
+	return b.String()
 }
 ```
 
-**When not to pool.** Long-lived objects (the GC handles those fine),
-low-churn paths (the pool costs more than it saves), objects with real
-teardown semantics, and anything where you can't guarantee no reference
-survives `Put`. A pool that isn't hit hard is a memory leak with extra steps.
+`strings.Builder.String` exposes the built bytes as an immutable string
+without a final copy. Never copy a non-zero `Builder`. Use `bytes.Buffer`
+instead when the consumer needs `[]byte`, `io.Reader`, or `io.Writer`
+behavior.
 
-Note that pooled objects are cleared at GC, so a pool is a throughput
-optimization for sustained load, not a cache.
+**Use when:** several fragments form one retained string. **Backfires when:**
+the estimate substantially overstates normal output, one concatenation would
+already be clear and cheap, or callers need mutable bytes and immediately
+convert the result back.
 
-## Interface boxing
+## Distinguish interface conversion from heap allocation
 
-Assigning a concrete value to an interface stores a type descriptor plus a
-data pointer. When the value isn't already on the heap, that assignment
-allocates a copy.
+Putting a concrete value in an interface constructs an interface value. It
+allocates backing storage only when the concrete data must escape its current
+storage or another operation around the conversion allocates. Verify with
+`-gcflags=-m=2` and `allocs/op`; do not equate every box with a heap object.
+
+An escaping interface collection can make large value copies expensive:
 
 ```go
-type Shape interface{ Area() float64 }
+type Shape interface {
+	Area() float64
+}
 
-shapes := make([]Shape, 0, len(squares))
-for _, s := range squares {
-    shapes = append(shapes, s)  // copies the whole struct into a new allocation
+func retain(dst []Shape, squares []Square) []Shape {
+	for i := range squares {
+		dst = append(dst, &squares[i])
+	}
+	return dst
 }
 ```
 
-For a large struct, that copies the entire value on every append. Boxing a
-pointer copies eight bytes instead:
+Use `&squares[i]`, not `&square`, when identity must refer to the slice
+element. The pointer form avoids copying a large value into interface storage,
+but it retains the entire `squares` backing array, permits mutation through
+aliases, adds indirection, and may move data to the heap. For small immutable
+values, storing the value is often faster and simpler.
+
+At an internal hot boundary with a stable type, a concrete function or a
+generic helper can enable static dispatch. Keep interfaces where runtime
+polymorphism, package boundaries, or testability justify them; compiler
+devirtualization may already remove the indirect call.
+
+**Use concrete or pointer forms when:** profiles attribute material copy,
+dispatch, or escape cost to the interface path. **Backfires when:** the change
+weakens the abstraction, retains a large owner, increases generated generic
+code, or trades a cheap value copy for pointer chasing and GC scan work.
+
+## Pool only proven temporary churn
+
+Use `sync.Pool` for temporary, independently reusable objects shared across
+many concurrent calls. Treat every `Get` as a cache miss: the runtime may
+remove any pooled value at any time without notification.
 
 ```go
-for i := range squares {
-    shapes = append(shapes, &squares[i])
+var bufferPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+func encodeResponse(w io.Writer, v Value) error {
+	b := bufferPool.Get().(*bytes.Buffer)
+	b.Reset()
+	defer func() {
+		if b.Cap() <= 64<<10 {
+			b.Reset()
+			bufferPool.Put(b)
+		}
+	}()
+
+	if err := encode(b, v); err != nil {
+		return err
+	}
+	_, err := w.Write(b.Bytes())
+	return err
 }
 ```
 
-Note `&squares[i]` rather than `&s` — a loop variable's address is not the
-element's address, and taking it forces the copy you were avoiding. (Go 1.22+
-gives each iteration its own variable, which makes `&s` safe but still a
-copy.)
+Choose the retention cap from observed size percentiles and the service memory
+budget; `64<<10` is only an example. Reset all logical state before reuse, and
+clear sensitive bytes when confidentiality requires it. Nothing returned by
+the operation may reference pooled storage after `Put`.
 
-Small values (`int`, `float64`) still allocate when boxed — the runtime has
-not inlined values into interfaces since Go 1.4 — but the cost is small
-enough to ignore outside tight loops. In a profile, boxing shows up as
-`runtime.convT*` allocations.
+**Use when:** a profile shows repeated construction of similar temporary
+objects under sustained concurrent load and a benchmark includes misses and
+parallel use. **Backfires when:** objects are cheap, traffic is sparse, sizes
+have outliers, cleanup has ownership semantics, callers retain aliases, or the
+pool is mistaken for a cache with availability guarantees. Never copy a Pool
+after first use.
 
-**When boxing is right:** anywhere the abstraction earns its keep. Interfaces
-at package boundaries, `io.Reader`/`io.Writer`, test seams, runtime
-polymorphism. Avoid interfaces in hot inner loops where the concrete type is
-known and stable; keep them everywhere else. Note also that a value in an
-interface can't be inlined through, so a hot call through an interface pays
-an indirect call plus the lost inlining, not just the boxing.
+## Lay out dense structs deliberately
 
-## Struct layout and padding
-
-Fields are aligned to their own width, and the compiler inserts padding to
-satisfy that. Field order therefore changes the size of every instance.
+The compiler inserts padding to meet each field's alignment. Group fields with
+similar alignment, commonly larger-alignment fields before narrow scalars, in
+types allocated in large arrays or copied frequently:
 
 ```go
-// 24 bytes: 1 byte + 7 padding + 8 + 1 + 7 padding
-type Poorly struct {
-    Flag  bool
-    Count int64
-    Small uint8
-}
-
-// 16 bytes: 8 + 1 + 1 + 6 padding
-type Well struct {
-    Count int64
-    Flag  bool
-    Small uint8
+type Sample struct {
+	Timestamp int64
+	Name      string
+	Count     uint32
+	Kind      uint16
+	Ready     bool
 }
 ```
 
-At a million instances that is 8 MB of pure padding, plus the cache lines
-wasted moving it around. Reordering is free — no logic changes — so order
-fields widest-first by default: pointers and 8-byte scalars, then 4, then 2,
-then bools and single bytes, with strings and slices (which are multi-word
-headers) grouped near the top.
+Check the deployed architectures with `unsafe.Sizeof`, `unsafe.Alignof`, or a
+layout analyzer. Pointer-containing headers also affect GC scan work; total
+bytes are not the only metric.
 
-`fieldalignment` (in `golang.org/x/tools/go/analysis/passes/fieldalignment`,
-also available through `go vet -vettool` and most linter aggregators) finds
-these automatically. Worth wiring into CI once.
+**Use when:** many instances make padding visible in heap or cache profiles.
+**Backfires when:** reordering breaks a binary/foreign-memory contract,
+reflection or unsafe code depends on offsets, meaningful field grouping is
+lost, or a singleton type gains no measurable benefit. Widest-first is a
+heuristic, not a portable size proof.
 
-Don't reorder when it destroys a meaningful grouping in a struct that is
-never allocated in bulk — a config struct instantiated once doesn't care.
+## Separate contended fields only after proving false sharing
 
-## False sharing
-
-A cache line is 64 bytes on mainstream CPUs. Two fields in the same line are,
-as far as the coherence protocol is concerned, one unit: if goroutine A
-writes field X on core 1, core 2's copy of the line is invalidated, so
-goroutine B's read of unrelated field Y stalls.
+Independent atomics can invalidate the same cache line when different cores
+write them. After a scaling benchmark identifies false sharing, isolate the
+write-owned state using a cache-line size verified for the target:
 
 ```go
-// Both counters land in one cache line: every write to one stalls the other.
-type Counters struct {
-    A atomic.Int64
-    B atomic.Int64
-}
+const cacheLine = 64 // target-specific; verify before relying on it
 
-// Padded to separate lines.
-type Counters struct {
-    A atomic.Int64
-    _ [56]byte
-    B atomic.Int64
-    _ [56]byte
+type paddedCounter struct {
+	_     [cacheLine]byte
+	value atomic.Int64
+	_     [cacheLine]byte
 }
 ```
 
-This only matters for fields written frequently by different goroutines —
-per-core counters, sharded state, ring buffer head/tail indices. Padding
-everything wastes memory for nothing. Reach for it when a benchmark shows a
-concurrent counter or sharded structure scaling badly with core count, not
-preemptively.
+Prefer ownership or sharding changes before padding: a worker-local counter
+merged periodically often removes both sharing and atomic traffic.
 
-## Zero-copy slicing
+**Use when:** throughput collapses as cores increase and hardware or controlled
+benchmarks implicate cache coherence. **Backfires when:** fields are read-only,
+written by the same goroutine, the assumed line size is wrong, or padding
+inflates large arrays enough to harm locality and memory use.
 
-Slicing shares the backing array; no copy, no allocation.
+## Make aliasing an ownership decision
+
+Slicing is zero-allocation because the views share one backing array:
 
 ```go
-func header(buf []byte) []byte {
-    return buf[:8]   // free
+func prefix(buf []byte, n int) []byte {
+	if n > len(buf) {
+		n = len(buf)
+	}
+	return buf[:n]
 }
 ```
 
-This is genuinely free when the data is read-only for its whole lifetime and
-the sub-slice does not outlive the buffer. It is a paid win the moment either
-of those is uncertain, because you have created aliasing: whoever writes
-through one view changes what the other sees.
-
-Two rules keep it safe:
-
-1. Document ownership at the function boundary — "the returned slice aliases
-   `buf` and is valid until the next `Read`" — or copy.
-2. Copy before handing data to anything that might retain it (see below).
-
-`io.CopyBuffer` is the same idea for streams: it reuses one caller-supplied
-buffer rather than allocating per copy.
+Use this only when the caller knows exactly how long the alias is valid and
+who may mutate it. State contracts such as "valid until the next Read" in the
+API. Copy before an asynchronous handoff, retention, mutation by another
+owner, or pool return:
 
 ```go
-func stream(dst io.Writer, src io.Reader) error {
-    buf := make([]byte, 32*1024) // or from a pool
-    _, err := io.CopyBuffer(dst, src, buf)
-    return err
+owned := bytes.Clone(frame)
+queue <- owned
+```
+
+**Use sharing when:** ownership is exclusive or immutability and lifetime are
+enforced. **Backfires when:** an alias crosses a goroutine or package boundary,
+the producer reuses storage, or retained capacity pins much more memory than
+the visible value. Zero-copy is a paid optimization.
+
+## Break accidental backing-store retention
+
+A short slice or substring keeps its complete backing allocation reachable.
+When a small result will outlive a large input, detach it:
+
+```go
+func retainFrame(readBuffer []byte, n int) []byte {
+	return bytes.Clone(readBuffer[:n])
+}
+
+func retainName(record string, start, end int) string {
+	return strings.Clone(record[start:end])
 }
 ```
 
-Note that `io.CopyBuffer` ignores the buffer if `src` implements `WriterTo`
-or `dst` implements `ReaderFrom` — those paths are already efficient.
+Limiting a slice's capacity does not release its backing array. Cloning does.
+The same retention occurs in queues that repeatedly reslice from the front;
+clear removed pointer elements and compact or replace the backing store when
+retained capacity becomes material.
 
-## The retained-backing-array leak
+**Use when:** heap profiles show a large owner retained by small live views, or
+the view crosses an ownership boundary. **Backfires when:** the view is
+short-lived, most of the input remains useful, or the copy adds more churn
+than the retained bytes cost. Decide from retained-heap profiles, not length
+alone.
 
-A sub-slice keeps the *entire* backing array alive, not just the visible
-window. This is the most common memory leak in connection-handling code.
+## Version compatibility
 
-```go
-buf := pool.Get().([]byte)      // 32 KB
-n, _ := conn.Read(buf)
-
-data := buf[:n]                 // n might be 12
-queue <- data                   // 32 KB stays reachable, per message
-```
-
-Across thousands of connections this retains hundreds of megabytes that
-`pprof` will attribute to the pool, not the queue. Copy when handing off:
-
-```go
-data := make([]byte, n)
-copy(data, buf[:n])
-queue <- data
-```
-
-The copy is cheap; the retention is not. Same trap applies to
-`slice = slice[1:]` in a queue implementation — the dropped prefix stays
-alive — and to holding a small substring of a large string.
+`strings.Clone` requires Go 1.18 and `bytes.Clone` requires Go 1.20. For an
+older supported module, force an owned byte copy with
+`append([]byte(nil), src...)`; detach a retained string with
+`string(append([]byte(nil), src...))` only when that lifetime boundary requires
+it. Typed atomic values in layout examples also depend on the module's Go
+version. Preserve the repository minimum and test allocation behavior with the
+exact deployed compiler.

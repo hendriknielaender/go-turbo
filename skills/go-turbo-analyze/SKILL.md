@@ -6,17 +6,16 @@ description: >
   bottleneck is, what evidence says so, and what the fix would be. Changes
   nothing. Use when the user says "why is this slow", "what's the bottleneck",
   "analyze this Go code", "profile this", "where is the time going", "high
-  CPU", "memory keeps growing", "GC is killing us", "/go-turbo-analyze", or
+  CPU", "memory keeps growing", "GC is killing us", "$go-turbo-analyze", or
   hands over a pprof profile, benchmark output, or a slow handler and asks
   what's wrong. Use this BEFORE go-turbo-improve — diagnosis first, then fix.
-license: MIT
 ---
 
 # go-turbo-analyze
 
 Diagnose, don't fix. The deliverable is a ranked, evidence-backed account of
 where the time or memory goes and what each item would take to address. The
-user decides what to act on; `/go-turbo-improve` executes.
+user decides what to act on; `$go-turbo-improve` executes.
 
 The failure mode this skill exists to prevent is confident guessing —
 recommending `sync.Pool` for something that turns out to be an O(n²) loop.
@@ -24,25 +23,28 @@ Rank by evidence strength, and mark anything unmeasured as unmeasured.
 
 ## Procedure
 
-**1. Establish what "slow" means.** Latency, throughput, memory, or CPU cost?
-p50 or p99? Under what load? If the user hasn't said, infer from what they
-gave you and state the assumption in one line. A p99 problem and a throughput
-problem have almost disjoint solution sets.
+**1. Establish what "slow" means.** Latency, throughput, memory, CPU cost, or
+capacity? Which percentile, under what load, on which deployment? If the user
+has not said, infer only what the available evidence supports and state the
+assumption. The same mechanism can affect throughput and tail latency, but the
+experiment and acceptance threshold differ.
 
-**2. Use whatever evidence exists.** In descending order of value:
+**2. Use evidence matched to the question:**
 
-- a `pprof` profile the user provided or that you can capture
-- benchmark output, especially with `-benchmem`
-- production metrics, `GODEBUG=gctrace=1` output, dashboards
-- the code alone
+- production latency, throughput, queue, saturation, and memory metrics;
+- CPU, allocation, heap, mutex, or block profiles for their specific costs;
+- a short execution trace for scheduler, blocking, and tail-latency behavior;
+- representative microbenchmarks for local mechanisms;
+- code reading as a hypothesis generator, never as proof of impact.
 
 If you can run things, get evidence rather than reading tea leaves:
 
 ```sh
 go test -bench=. -benchmem -run=^$ ./...
-go test -bench=<hot> -cpuprofile=cpu.out -memprofile=mem.out ./pkg
+go test -run='^$' -bench='BenchmarkTarget$' \
+  -cpuprofile=cpu.out -memprofile=mem.out ./pkg
 go tool pprof -top -nodecount=25 cpu.out
-go build -gcflags=-m ./... 2>&1 | grep -E 'escapes to heap|moved to heap'
+go build -gcflags='-m=2' ./... 2>&1 | rg 'escapes to heap|moved to heap'
 ```
 
 For a running service: `/debug/pprof/profile?seconds=30` under load,
@@ -94,21 +96,27 @@ afternoon.
 ## Rules
 
 - **Never recommend a paid win on code reading alone.** Pooling, `unsafe`,
-  zero-copy sharing, and GC tuning require measurement. Free wins
-  (preallocation, `strings.Builder`, buffered I/O, field ordering) can be
-  recommended from code inspection — say which category each item is in.
+  zero-copy sharing, sharding, and runtime tuning require measurement. A
+  baseline improvement can be recommended only when its capacity, lifetime,
+  flush, error, and compatibility preconditions are visible in the code.
 - **Separate cumulative from flat time.** A function with 90% cumulative and
   2% flat is a caller, not a bottleneck. Descend before reporting.
-- **Match the profile to the question.** `/allocs` explains GC pressure;
-  `/heap` explains memory growth. Confusing them sends people the wrong way.
-- **Low CPU with bad tail latency means blocking, not compute.** Go to the
-  block profile or the execution tracer, not the CPU profile.
+- **Match the profile to the question.** `/allocs` shows allocation volume;
+  `/heap` is a retained-memory snapshot, so memory growth needs comparable
+  snapshots over time. Confusing them sends people the wrong way.
+- **Low CPU with bad tail latency points away from local compute.** Inspect
+  queues, external waits, scheduler delay, lock/channel blocking, and overload.
+  A block profile covers synchronization primitives; an execution trace and
+  request telemetry cover the wider path.
 - **Attribute retained memory carefully.** `pprof` credits the allocation
   site, so a retained sub-slice appears under whoever allocated the big
   buffer, not whoever holds it.
 
-Load `references/measurement.md` from the `go-turbo` skill for profile
-interpretation, and the reference matching the tag for fix details.
+When the core skill is installed alongside this one, load its complete
+[measurement reference](../go-turbo/references/measurement.md) for profile
+interpretation and use `$go-turbo`'s routing table for the reference matching
+the diagnosis tag. This workflow remains usable without those optional
+references.
 
 ## Boundaries
 
@@ -116,5 +124,4 @@ Reports only, changes nothing — that's what makes it safe to run on
 unfamiliar code. Correctness bugs and security issues spotted along the way
 get mentioned in one line and routed to a normal review; they are not this
 skill's job. One-shot.
-
-"stop go-turbo-analyze" or "normal mode" to revert.
+Task-scoped.
