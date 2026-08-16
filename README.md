@@ -1,5 +1,6 @@
 > [!WARNING]  
 > Still work in progress.
+> Token usage currently to high to recommend
 
 <h1 align="center">go-turbo</h1>
 
