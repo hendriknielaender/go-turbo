@@ -1,0 +1,41 @@
+{
+  "judge": {
+    "model": "claude-sonnet-5",
+    "repeats": 3,
+    "note": "Pinned deliberately. Change it and every rubric score moves, so re-grade the whole suite when you do. Prefer a judge outside the family under test; when that is not possible, treat rubric-task deltas as weaker evidence than script-task deltas."
+  },
+  "arms": {
+    "plain": {
+      "description": "Baseline. No go-turbo, no operator customizations."
+    },
+    "skill": {
+      "description": "go-turbo loaded as a plugin. Prompt text is identical to the baseline, so the skill must trigger on its own description.",
+      "plugin_dirs": [
+        "."
+      ]
+    },
+    "skill-forced": {
+      "description": "go-turbo loaded and named in the system prompt. Isolates skill content quality from skill triggering; compare against 'skill' to measure trigger reliability.",
+      "plugin_dirs": [
+        "."
+      ],
+      "append_system_prompt": "For any Go implementation, review, or performance task, invoke the go-turbo skill before you begin."
+    }
+  },
+  "defaults": {
+    "models": [
+      "opus:xhigh"
+    ],
+    "arms": [
+      "plain",
+      "skill"
+    ],
+    "timeout_seconds": 1800
+  },
+  "tasks": [
+    "dedup-implement",
+    "config-startup",
+    "logfmt-hotpath",
+    "ingest-review"
+  ]
+}

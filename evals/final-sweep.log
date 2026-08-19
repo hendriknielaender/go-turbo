@@ -1,0 +1,25 @@
+24 runs pending (2 tasks x 2 models x 2 arms x 3 repeats, 8 cells), 5 at a time
+[1/24] ok  logfmt-hotpath__sonnet-high__plain__r1 $0.316 236,544tok 106s
+[2/24] ok  logfmt-hotpath__sonnet-high__plain__r2 $0.351 303,873tok 108s
+[3/24] ok  logfmt-hotpath__sonnet-high__plain__r3 $0.372 330,179tok 115s
+[4/24] ok  logfmt-hotpath__sonnet-high__skill__r2 $0.467 464,072tok 176s
+[5/24] ok  logfmt-hotpath__sonnet-high__skill__r3 $0.453 484,856tok 165s
+[6/24] ok  logfmt-hotpath__opus-medium__plain__r2 $0.631 296,380tok 165s
+[7/24] ok  logfmt-hotpath__opus-medium__plain__r1 $0.618 290,000tok 188s
+[8/24] ok  logfmt-hotpath__sonnet-high__skill__r1 $0.723 727,600tok 326s
+[9/24] ok  logfmt-hotpath__opus-medium__plain__r3 $0.593 254,908tok 171s
+[10/24] ok  ingest-review__sonnet-high__plain__r1 $0.186 65,094tok 97s
+[11/24] ok  ingest-review__sonnet-high__plain__r2 $0.193 87,799tok 81s
+[12/24] ok  logfmt-hotpath__opus-medium__skill__r1 $0.652 320,152tok 161s
+[13/24] ok  ingest-review__sonnet-high__plain__r3 $0.167 64,005tok 81s
+[14/24] ok  ingest-review__sonnet-high__skill__r1 $0.179 66,142tok 88s
+[15/24] ok  logfmt-hotpath__opus-medium__skill__r3 $0.702 383,961tok 229s
+[16/24] ok  ingest-review__sonnet-high__skill__r2 $0.224 91,372tok 101s
+[17/24] ok  ingest-review__opus-medium__plain__r1 $0.256 86,479tok 72s
+[18/24] ok  logfmt-hotpath__opus-medium__skill__r2 $0.920 390,686tok 309s
+[19/24] ok  ingest-review__opus-medium__plain__r2 $0.262 86,982tok 73s
+[20/24] ok  ingest-review__sonnet-high__skill__r3 $0.236 114,442tok 101s
+[21/24] ok  ingest-review__opus-medium__plain__r3 $0.278 86,813tok 90s
+[22/24] ok  ingest-review__opus-medium__skill__r1 $0.283 89,366tok 82s
+[23/24] ok  ingest-review__opus-medium__skill__r2 $0.295 110,676tok 85s
+[24/24] ok  ingest-review__opus-medium__skill__r3 $0.287 109,841tok 85s
