@@ -19,7 +19,12 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PRIMARY = "go-turbo"
-ALLOWED_SKILL_FRONTMATTER = {"name", "description"}
+ALLOWED_SKILL_FRONTMATTER = {
+    "name",
+    "description",
+    "disable-model-invocation",
+    "argument-hint",
+}
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\."
@@ -48,119 +53,314 @@ PLUGIN_CATEGORIES = {
 IGNORED_SCAN_DIRECTORIES = {".git", "node_modules", "dist", "__pycache__"}
 
 REQUIRED_REFERENCES = {
-    "allocation.md",
-    "compiler.md",
-    "concurrency.md",
-    "data-structures.md",
-    "encoding-and-text.md",
+    "admission-control.md",
+    "aead-nonces.md",
+    "backpressure.md",
+    "base64.md",
+    "batching.md",
+    "benchmark-inputs.md",
+    "binary-encoding.md",
+    "block-profiles.md",
+    "bounded-queues.md",
+    "bounding-concurrency.md",
+    "bounds-check-elimination.md",
+    "buffering.md",
+    "build-experiments.md",
+    "build-flags.md",
+    "caller-owned-buffers.md",
+    "cgo.md",
+    "channels.md",
+    "choosing-structures.md",
+    "circuit-breakers.md",
+    "comparing-benchmarks.md",
+    "compiler-diagnostics.md",
+    "compression.md",
+    "connection-scale.md",
+    "context-cancellation.md",
+    "dns.md",
     "escape-analysis.md",
-    "gc-and-runtime.md",
-    "io-and-syscalls.md",
-    "measurement.md",
-    "networking.md",
-    "protocols.md",
-    "scaling-and-resilience.md",
-    "toolchain-upgrades.md",
+    "escape-causes.md",
+    "files-and-mmap.md",
+    "finding-allocations.md",
+    "framing.md",
+    "gc-cost.md",
+    "gc-diagnosis.md",
+    "gc-tuning.md",
+    "gomaxprocs.md",
+    "goroutine-budgets.md",
+    "goroutine-leaks.md",
+    "graceful-shutdown.md",
+    "grpc.md",
+    "hashing.md",
+    "heaps.md",
+    "hot-dispatch.md",
+    "http-client-config.md",
+    "http-connection-reuse.md",
+    "http-servers.md",
+    "http-versions.md",
+    "http2-tuning.md",
+    "httptrace.md",
+    "immutable-snapshots.md",
+    "in-place-transforms.md",
+    "inlining.md",
+    "interface-boxing.md",
+    "interpreting-results.md",
+    "json.md",
+    "load-shedding.md",
+    "load-testing.md",
+    "map-vs-slice.md",
+    "memory-layout.md",
+    "monotonic-stacks.md",
+    "mutexes-and-atomics.md",
+    "necessary-escapes.md",
+    "netpoll.md",
+    "object-lifetime.md",
+    "pgo.md",
+    "pointer-density.md",
+    "pooling.md",
+    "pprof.md",
+    "presizing.md",
+    "protocol-selection.md",
+    "queues-and-rings.md",
+    "quic.md",
+    "rate-limiting.md",
+    "request-deadlines.md",
+    "resource-budgets.md",
+    "retention.md",
+    "retries.md",
+    "run-metadata.md",
+    "same-host-comparison.md",
+    "sample-variance.md",
+    "scheduler-state.md",
+    "sharding.md",
+    "socket-options.md",
+    "sorting.md",
+    "stream-copies.md",
+    "strings-and-bytes.md",
+    "tcp-framing.md",
+    "text-processing.md",
+    "tls.md",
+    "udp.md",
+    "upgrade-experiment.md",
+    "value-semantics.md",
+    "workflow.md",
+    "writing-benchmarks.md",
 }
 
 # Each group describes a capability the knowledge base promises. At least one
 # phrase in every tuple must appear in that reference. Keep these as domain
 # contracts, not as a prose snapshot, so authors can rewrite sections freely.
 COVERAGE: dict[str, tuple[tuple[str, ...], ...]] = {
-    "allocation.md": (
-        ("preallocate", "preallocation"),
-        ("sync.pool",),
-        ("interface", "boxing"),
-        ("false sharing",),
-        ("backing-store retention", "backing array"),
+    "admission-control.md": (
+        ("bounded", "admission"),
+        ("admission control",),
     ),
-    "compiler.md": (
-        ("inlining",),
-        ("devirtual",),
+    "aead-nonces.md": (
+        ("newgcmwithrandomnonce",),
+    ),
+    "backpressure.md": (
+        ("backpressure",),
+    ),
+    "base64.md": (
+        ("base64",),
+    ),
+    "batching.md": (
+        ("flush",),
+        ("batch",),
+        ("lock",),
+    ),
+    "binary-encoding.md": (
+        ("binary.append", "binary.encode"),
+    ),
+    "bounded-queues.md": (
+        ("queue",),
+    ),
+    "bounds-check-elimination.md": (
         ("bounds-check", "bounds check"),
-        ("profile-guided optimization", "pgo"),
+    ),
+    "buffering.md": (
+        ("buffer",),
+    ),
+    "build-flags.md": (
+        ("build tag", "//go:build"),
+    ),
+    "cgo.md": (
+        ("cgo",),
+    ),
+    "circuit-breakers.md": (
+        ("circuit breaker", "circuit-breaker"),
+    ),
+    "compiler-diagnostics.md": (
         ("disassembly", "objdump"),
     ),
-    "concurrency.md": (
-        ("bounded", "admission"),
-        ("backpressure",),
-        ("mutex", "atomic"),
+    "compression.md": (
+        ("compression", "gzip", "zstd"),
+    ),
+    "connection-scale.md": (
+        ("accept",),
+    ),
+    "context-cancellation.md": (
         ("cancellation", "context"),
-        ("false sharing", "false-sharing", "cache line", "cache-line"),
     ),
-    "data-structures.md": (
-        ("slice", "map"),
-        ("complexity", "cost model"),
-        ("priority queue", "container/heap"),
-        ("ring", "queue"),
-        ("sort",),
-    ),
-    "encoding-and-text.md": (
-        ("binary.append", "binary.encode"),
-        ("base64",),
-        ("json",),
-        ("regexp", "regex"),
-        ("hash.hash", "streaming hasher"),
-        ("newgcmwithrandomnonce",),
-        ("compression",),
+    "dns.md": (
+        ("dns",),
     ),
     "escape-analysis.md": (
         ("-m=2",),
-        ("lifetime",),
+    ),
+    "escape-causes.md": (
         ("closure",),
-        ("interface",),
-        ("inlining",),
     ),
-    "gc-and-runtime.md": (
-        ("gogc",),
-        ("gomemlimit",),
-        ("gomaxprocs",),
-        ("goroutine", "stack"),
-        ("netpoll",),
-    ),
-    "io-and-syscalls.md": (
-        ("buffer",),
-        ("batch",),
-        ("flush",),
-        ("error",),
+    "files-and-mmap.md": (
+        ("slice", "map"),
         ("mmap",),
     ),
-    "measurement.md": (
-        ("b.loop",),
-        ("benchstat",),
-        ("allocs/op",),
-        ("pprof",),
-        ("coordinated omission", "open-loop"),
+    "gc-tuning.md": (
+        ("gogc",),
+        ("gomemlimit",),
     ),
-    "networking.md": (
+    "gomaxprocs.md": (
+        ("gomaxprocs",),
+    ),
+    "goroutine-budgets.md": (
+        ("goroutine", "stack"),
+    ),
+    "goroutine-leaks.md": (
+        ("leak",),
+    ),
+    "grpc.md": (
+        ("grpc",),
+    ),
+    "hashing.md": (
+        ("hash.hash", "streaming hasher"),
+    ),
+    "heaps.md": (
+        ("priority queue", "container/heap"),
+    ),
+    "hot-dispatch.md": (
+        ("inlining",),
+    ),
+    "http-client-config.md": (
         ("http.transport",),
-        ("deadline", "timeout"),
-        ("tls",),
-        ("dns",),
+    ),
+    "http-versions.md": (
+        ("decoder", "stream"),
+        ("http/3",),
+    ),
+    "http2-tuning.md": (
+        ("http/2",),
+    ),
+    "httptrace.md": (
         ("observability", "httptrace"),
     ),
-    "protocols.md": (
-        ("udp",),
-        ("http/2",),
-        ("http/3",),
-        ("grpc",),
+    "inlining.md": (
+        ("devirtual",),
+    ),
+    "interface-boxing.md": (
+        ("interface", "boxing"),
+        ("interface",),
+    ),
+    "interpreting-results.md": (
+        ("rollout", "canary"),
+        ("rollback",),
+    ),
+    "json.md": (
+        ("json",),
+    ),
+    "load-shedding.md": (
+        ("load shedding", "shed"),
+        ("retry-after",),
+    ),
+    "load-testing.md": (
+        ("coordinated omission", "open-loop"),
+    ),
+    "memory-layout.md": (
+        ("false sharing", "false-sharing"),
+        ("alias",),
+    ),
+    "mutexes-and-atomics.md": (
+        ("mutex", "atomic"),
+    ),
+    "netpoll.md": (
+        ("netpoll",),
+    ),
+    "object-lifetime.md": (
+        ("lifetime",),
+        ("weak",),
+        ("cleanup", "finalizer"),
+    ),
+    "pgo.md": (
+        ("profile-guided optimization", "pgo"),
+    ),
+    "pooling.md": (
+        ("sync.pool",),
+    ),
+    "pprof.md": (
+        ("pprof",),
+    ),
+    "presizing.md": (
+        ("preallocate", "preallocation"),
+    ),
+    "queues-and-rings.md": (
+        ("ring", "queue"),
+    ),
+    "quic.md": (
         ("quic",),
         ("replay-safe", "replay safe"),
     ),
-    "scaling-and-resilience.md": (
-        ("admission control",),
+    "rate-limiting.md": (
         ("rate limiting", "token bucket"),
-        ("circuit breaker", "circuit-breaker"),
-        ("load shedding", "shed"),
-        ("retry-after",),
-        ("degraded", "degradation"),
     ),
-    "toolchain-upgrades.md": (
+    "request-deadlines.md": (
+        ("deadline", "timeout"),
+        ("timeout",),
+    ),
+    "retention.md": (
+        ("backing-store retention", "backing array"),
+    ),
+    "retries.md": (
+        ("retry",),
+        ("degraded", "degradation"),
+        ("idempot",),
+    ),
+    "sample-variance.md": (
+        ("benchstat",),
+        ("allocs/op",),
+    ),
+    "sharding.md": (
+        ("shard",),
+    ),
+    "socket-options.md": (
+        ("so_reuseport", "socket option", "setsockopt"),
+    ),
+    "sorting.md": (
+        ("sort",),
+    ),
+    "strings-and-bytes.md": (
+        ("strings.builder",),
+        ("[]byte",),
+    ),
+    "text-processing.md": (
+        ("regexp", "regex"),
+        ("strconv.append", "appendint"),
+    ),
+    "tls.md": (
+        ("tls",),
+    ),
+    "udp.md": (
+        ("udp",),
+    ),
+    "upgrade-experiment.md": (
         ("go version", "toolchain"),
+    ),
+    "workflow.md": (
+        ("cruise",),
+        ("redline",),
+        ("complexity", "cost model"),
+    ),
+    "writing-benchmarks.md": (
+        ("b.loop",),
         ("benchmark",),
-        ("profile",),
-        ("rollout",),
-        ("rollback",),
     ),
 }
 
@@ -229,7 +429,7 @@ def check_branding_image(path: pathlib.Path) -> None:
 
 
 def split_frontmatter(text: str, path: pathlib.Path) -> tuple[dict[str, str], str] | None:
-    """Parse the flat YAML subset used by skill and command frontmatter."""
+    """Parse the flat YAML subset used by skill frontmatter."""
     if not text.startswith("---\n"):
         fail(f"{rel(path)}: missing YAML frontmatter")
         return None
@@ -329,8 +529,26 @@ def check_skills() -> set[str]:
         else:
             names.add(name)
 
-        if not 80 <= len(description) <= 1024:
-            fail(f"{rel(path)}: description length {len(description)} is outside 80..1024")
+        disabled = frontmatter.get("disable-model-invocation")
+        if name == PRIMARY:
+            if disabled is not None:
+                fail(f"{rel(path)}: the primary skill must stay model-invocable")
+        elif disabled != "true":
+            fail(
+                f"{rel(path)}: companion skills must set "
+                f"disable-model-invocation: true so only {PRIMARY} auto-triggers"
+            )
+
+        # The primary skill is model-invoked, so its description is the trigger and
+        # earns the richer floor. Companions fire only when a human types them, so
+        # their description is a human-facing one-liner; padding it to 80 buys
+        # nothing and costs always-loaded context on every turn.
+        floor = 80 if name == PRIMARY else 40
+        if not floor <= len(description) <= 1024:
+            fail(
+                f"{rel(path)}: description length {len(description)} "
+                f"is outside {floor}..1024"
+            )
         if len(text.splitlines()) > 500:
             fail(f"{rel(path)}: exceeds the 500-line skill guideline")
         if re.search(r"(?:^|\s)/go-turbo(?:\s|$)", body, re.MULTILINE):
@@ -414,31 +632,16 @@ def check_references() -> None:
             fail(f"{rel(path)}: not directly routed from the primary SKILL.md")
         if f"`{path.name}`" not in readme:
             fail(f"{rel(path)}: not listed in README.md")
-        if len(text.splitlines()) > 100 and "## Contents" not in text:
-            fail(f"{rel(path)}: long reference needs a Contents section")
+        # An index earns its place only where there is something to navigate:
+        # a long file with several sections. One entry is the title restated.
+        sections = len(re.findall(r"^## (?!Contents$)", text, re.M))
+        if len(text.splitlines()) > 100 and sections >= 3 and "## Contents" not in text:
+            fail(f"{rel(path)}: long multi-section reference needs a Contents section")
+        if "## Contents" in text and sections < 3:
+            fail(f"{rel(path)}: Contents index with {sections} section(s) is furniture")
         for alternatives in COVERAGE.get(path.name, ()):
             if not any(phrase in lower for phrase in alternatives):
                 fail(f"{rel(path)}: missing capability phrase from {alternatives}")
-
-
-def check_commands(skill_names: set[str]) -> None:
-    paths = sorted((ROOT / "commands").glob("*.md"))
-    if {path.stem for path in paths} != skill_names:
-        fail("commands/: command names do not exactly match skill names")
-    for path in paths:
-        checked()
-        parsed = split_frontmatter(path.read_text(encoding="utf-8"), path)
-        if parsed is None:
-            continue
-        frontmatter, body = parsed
-        if not frontmatter.get("description"):
-            fail(f"{rel(path)}: missing command description")
-        if path.stem not in skill_names:
-            fail(f"{rel(path)}: no matching skill")
-        if f"`{path.stem}` skill" not in body:
-            fail(f"{rel(path)}: command does not delegate to its matching skill")
-        if re.search(r"stay active|persists until|persistent mode", body, re.I):
-            fail(f"{rel(path)}: claims unsupported cross-task persistence")
 
 
 def read_json(relative: str) -> dict[str, Any] | None:
@@ -874,7 +1077,6 @@ def main() -> int:
     names = check_skills()
     check_codex_discovery(names)
     check_references()
-    check_commands(names)
     check_manifests(names)
     check_release_contract()
     check_local_markdown_links()

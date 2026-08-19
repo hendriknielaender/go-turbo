@@ -1,110 +1,78 @@
 ---
 name: go-turbo
-description: >
-  Write, review, refactor, debug, benchmark, profile, and design idiomatic Go
-  for production performance. Use for any Go implementation or performance
-  task, including algorithms, data structures, allocation, escape analysis,
-  GC, concurrency, I/O, networking, serialization, latency, throughput,
-  memory use, profiling, and benchmarks. Apply staff/principal performance
-  judgment: preserve correctness, remove expensive work first, and require
-  evidence before adding optimization complexity. Do not use for non-Go work.
+description: Write, refactor, review, benchmark, or diagnose Go for performance. Use when latency, throughput, allocation, or memory matters in Go code. Go only.
+argument-hint: "[cruise|turbo|redline]"
 ---
 
 # Go Turbo
 
-Produce the simplest Go implementation that meets the workload. Treat speed,
-memory, throughput, and tail latency as measured properties, not coding styles.
-Prefer idiomatic code until evidence shows that a more complex shape earns its
-maintenance cost.
+Produce the simplest Go implementation that meets the workload. Speed, memory,
+throughput, and tail latency are measured properties, not coding styles. Stay
+idiomatic until evidence shows a more complex shape earns its maintenance cost.
 
 ## Operating contract
 
-Apply this contract throughout the current Go task:
-
 1. Preserve behavior, error semantics, cancellation, race freedom, validation,
    deadlines, and resource ownership.
-2. Inspect the repository, toolchain, call path, tests, benchmarks, and supplied
-   evidence before asking the user for facts that can be discovered locally.
-   Respect the module's minimum Go version; do not introduce a newer API or
-   silently raise that version unless the task authorizes it.
-3. Ask only for product constraints that materially change the answer, such as
-   the target SLO, representative workload, memory ceiling, or compatibility
-   boundary. State a safe assumption when work can continue without the answer.
-   When several user decisions depend on one another, map them internally and
-   ask only the dependency-ready frontier in a numbered round, with a
-   recommended default for each. Recompute after the answers. Research
-   environmental facts yourself; reserve questions for decisions.
-4. Work down the performance ladder in order. Stop when the expected return no
-   longer justifies the complexity.
-5. Distinguish observed evidence from a code-reading hypothesis. Never turn a
-   plausible mechanism into a performance claim.
-6. Make the smallest change that addresses the highest applicable rung.
-7. Verify behavior first, then measure the performance question the change was
-   intended to answer.
+2. Respect the module's minimum Go version. Raising it, or reaching for a newer
+   API, needs the task's authorization.
+3. Ask only about decisions that change the answer: target SLO, representative
+   workload, memory ceiling, compatibility boundary. Otherwise state a safe
+   assumption and continue.
+4. Make the smallest change that addresses the highest applicable rung. Stop
+   when the return stops justifying the complexity.
+5. Keep observed evidence and code-reading hypotheses apart. Verify behavior
+   first, then measure the question the change was meant to answer.
 
 ## Performance ladder
 
-Use this order; do not jump to runtime tricks while higher rungs remain open.
+Exhaust each rung before the next.
 
-1. **Avoid work.** Delete, defer, cache, coalesce, short-circuit, or stop work
-   after cancellation. Do not format, decode, fetch, or log data nobody uses.
+1. **Avoid work.** Delete, defer, cache, coalesce, short-circuit, or stop after
+   cancellation. Compute only what a consumer actually reads.
 2. **Choose the algorithm and data structure.** Fix the complexity class,
-   repeated scans or sorts, poor indexes, and redundant passes. Nothing below
+   repeated scans or sorts, poor indexes, redundant passes. Nothing below
    rescues an avoidable O(n²) path.
 3. **Reduce hot-path allocation.** Preallocate realistic known sizes, reuse a
-   caller-owned destination, keep one byte/string representation, and avoid
+   caller-owned destination, keep one byte/string representation, release
    retained backing arrays.
 4. **Remove incidental escapes.** Read compiler diagnostics, then restructure
-   only values whose heap lifetime is caused by code shape rather than design.
+   only values whose heap lifetime comes from code shape rather than design.
 5. **Amortize boundaries.** Batch or buffer syscalls, database operations,
-   remote calls, lock acquisitions, and channel handoffs.
+   remote calls, lock acquisitions, channel handoffs.
 6. **Bound and remove contention.** Limit concurrency, shorten or shard measured
-   critical sections, publish immutable snapshots, and enforce backpressure.
-7. **Tune representation and runtime.** Consider layout, false sharing, pools,
-   mmap, PGO, GC settings, socket controls, `unsafe`, SIMD, or custom protocols
-   only after measurement identifies that layer.
+   critical sections, publish immutable snapshots, enforce backpressure.
+7. **Tune representation and runtime.** Layout, false sharing, pools, mmap, PGO,
+   GC settings, socket controls, `unsafe`, SIMD, custom protocols — once
+   measurement identifies that layer.
 
 Trace the real path before climbing. A clean optimization in a cold function is
 still wasted complexity.
 
 ## Improvement classes
 
-### Baseline improvements
-
-Apply these without a profile when their preconditions and semantics are clear:
-
-- remove redundant work or select a better complexity class;
-- size a slice or map from a known or representative bound;
-- use `strings.Builder` or append-style byte APIs for repeated construction;
-- buffer repeated small I/O while preserving required flush behavior;
-- eliminate needless `string` and `[]byte` round trips;
-- reuse immutable compiled regexps, templates, and locations;
-- use `sync.OnceValue` or `sync.OnceValues` for ordinary lazy initialization
-  when the module supports Go 1.21+, otherwise use `sync.Once`;
-- copy a small view before a long-lived consumer would retain a large buffer;
-- propagate `context.Context`, close resources, and set network deadlines.
-
-Do not call an improvement free merely because its diff is short. Overlarge
-preallocation wastes memory; buffering changes visibility and failure timing;
-field order can affect reflection, encoding, cgo, or `unsafe`; a pointer can add
-an allocation and GC work. Check the preconditions.
+Ordinary improvements — presizing, `strings.Builder`, buffered I/O, dropping
+`string`/`[]byte` round trips, reusing compiled regexps, propagating context —
+ship without a profile once their preconditions hold. A short diff is not proof
+that a change is free; check the preconditions in `references/workflow.md`.
 
 ### Evidence-gated improvements
 
-Require a representative profile, trace, benchmark, or production metric before
-shipping any change that adds ownership rules, concurrency machinery,
-portability limits, or operational tuning:
+These add ownership rules, concurrency machinery, portability limits, or
+operational tuning, so each needs a representative profile, trace, benchmark, or
+production metric first:
 
 - `sync.Pool` and reusable mutable object graphs;
 - zero-copy aliasing or caller-visible buffer reuse;
-- lock sharding, CAS loops, lock-free structures, or cache-line padding;
-- structure-of-arrays layouts, manual encoding, or custom framing;
-- mmap, raw socket options, event loops, thread pinning, or CPU affinity;
-- `GOGC`, `GOMEMLIMIT`, `GOMAXPROCS`, build experiments, or PGO changes;
-- `unsafe`, assembly, or experimental SIMD.
+- lock sharding, CAS loops, lock-free structures, cache-line padding;
+- structure-of-arrays layouts, manual encoding, custom framing;
+- mmap, raw socket options, event loops, thread pinning, CPU affinity;
+- `GOGC`, `GOMEMLIMIT`, `GOMAXPROCS`, build experiments, PGO;
+- `unsafe`, assembly, experimental SIMD.
 
-For each shipped evidence-gated change, add a nearby comment naming the measured
-benefit, ownership or portability contract, and removal trigger:
+Each one ships with a nearby comment naming the measured benefit, the ownership
+or portability contract, and the removal trigger — and only ever with the
+evidence that comment describes:
 
 ```go
 // turbo: reuse 32 KiB decode buffers; BenchmarkDecode removed 1 alloc/op.
@@ -112,115 +80,65 @@ benefit, ownership or portability contract, and removal trigger:
 // allocation no longer appears in the production alloc profile.
 ```
 
-Never add such a comment without the evidence it describes.
-
-## Evidence workflow
-
-Match the tool to the question:
-
-- CPU time: CPU profile plus a representative load.
-- Allocation churn: allocation profile and `allocs/op`.
-- Retained memory: two heap profiles under steady load and a diff.
-- Blocking or contention: block/mutex profiles and an execution trace.
-- Scheduler or tail latency: a short execution trace under saturation.
-- Escape cause: `go build -gcflags='-m -m'`; treat it as diagnosis, not impact.
-- Local code change: focused benchmarks on realistic input distributions.
-- System change: an open-loop load test with stated concurrency/rate and SLOs.
-
-For a before/after benchmark, prefer:
-
-```sh
-go test -run='^$' -bench='BenchmarkTarget$' -benchmem -count=10 ./pkg > old.txt
-# make one coherent change
-go test -run='^$' -bench='BenchmarkTarget$' -benchmem -count=10 ./pkg > new.txt
-benchstat old.txt new.txt
-```
-
-Report `ns/op`, `B/op`, and `allocs/op` together. State the Go version,
-architecture, workload, and whether the result is a microbenchmark or an
-end-to-end measurement. Treat statistically indistinguishable results as no
-measurable change; remove unearned complexity.
-
-## Request-specific behavior
-
-- **Write or refactor:** implement idiomatic Go, apply safe baseline
-  improvements, and avoid speculative infrastructure. Add a benchmark only
-  when performance is a requirement or the chosen design needs evidence.
-- **Diagnose:** gather evidence and rank causes; do not modify files unless the
-  user also asks for a fix.
-- **Optimize:** baseline first, change one coherent mechanism, preserve behavior,
-  compare, and revert complexity that does not pay.
-- **Review:** report only actionable performance findings on paths plausibly hot;
-  flag premature optimization as aggressively as avoidable allocation.
-- **Benchmark:** model the real input sizes, warm/cold state, parallelism, and
-  outputs; guard against dead-code elimination and setup contamination.
-- **Design:** establish workload and SLOs, choose the high-level algorithm and
-  ownership model, and leave advanced tuning behind measurable decision gates.
-
 ## Verification gate
 
-Do not call an implementation complete until all applicable items hold:
+Run the items whose trigger fires; skip the rest rather than running them for
+form.
 
-1. Existing and focused behavior tests pass.
-2. Error paths, cancellation, shutdown, and resource cleanup remain intact.
-3. Run `go test -race` for any shared-state or concurrency change.
-4. Run `go vet` and repository-specific validation when available.
-5. Show before/after evidence for every performance claim and every
-   evidence-gated change.
-6. State unexercised production, load, platform, or hardware gates explicitly.
+1. Always: existing and focused behavior tests pass, `go vet` clean.
+2. Always: error paths, cancellation, shutdown, and resource cleanup intact.
+3. Shared state, goroutines, or channels touched: `go test -race`.
+4. Repository ships its own validation: run it.
+5. Performance claim made, or evidence-gated change shipped: show before/after
+   evidence for it. No claim, no benchmark needed.
+6. State the production, load, platform, or hardware gates you left unexercised.
+
+A task with no shared state, no plausibly hot path, and no performance claim is
+finished at items 1, 2, and 6.
 
 ## Output
 
-Lead with the code or verdict. Then give, at most, one line per non-obvious
-change, the actual measurement or `not measured`, the correctness checks, and
-the next rung worth investigating. Give full detail when the user asks for an
-audit, report, or walkthrough.
+Lead with the code or verdict. Then at most one line per non-obvious change, the
+actual measurement or `not measured`, the correctness checks, and the next rung
+worth investigating. Expand to full detail on request for an audit, report, or
+walkthrough.
 
-Never report “faster” from code inspection alone. Say “expected to reduce X;
-verify with Y.” Never generalize a microbenchmark into an end-to-end latency or
-throughput claim.
-
-## Intensity
-
-Use `turbo` unless the user selects another level:
-
-| Level | Behavior |
-|---|---|
-| `cruise` | Write clean idiomatic Go and apply safe baseline improvements. Do not restructure solely for speed. |
-| `turbo` | Enforce the ladder, inspect likely hot paths, and ship evidence-gated changes only when the evidence supports them. |
-| `redline` | Investigate every measured hot-path cost and permit low-level techniques, but keep the same correctness and evidence gates. Necessary allocations may remain. |
-
-Use `$go-turbo`, `$go-turbo cruise`, or `$go-turbo redline` when invoking the
-skill explicitly. Treat a requested level as scoped to the current task.
+Report a speedup only from a measurement. From code inspection alone, say
+"expected to reduce X; verify with Y." A microbenchmark stays a microbenchmark
+claim — end-to-end latency and throughput need end-to-end evidence.
 
 ## Reference routing
 
-Load only the references relevant to the current rung, and read each selected
-file completely before acting:
+Paths resolve against this skill's directory, or
+`${CLAUDE_PLUGIN_ROOT}/skills/go-turbo/` when that variable is set. Each reference
+runs 300–600 lines behind a `## Contents` index: read the section, not the file.
 
-| Reference | Load when |
-|---|---|
-| `references/data-structures.md` | Choosing algorithms, collections, indexes, queues, layouts, sorting, or lookup strategies. |
-| `references/allocation.md` | Investigating slice/map growth, strings/bytes, pools, boxing, layout, aliasing, or retention. |
-| `references/escape-analysis.md` | Reading `-gcflags=-m` or removing incidental heap escapes. |
-| `references/gc-and-runtime.md` | Diagnosing GC, memory limits, scheduler behavior, goroutine stacks, netpoll, or runtime settings. |
-| `references/concurrency.md` | Designing bounded work, synchronization, immutable snapshots, cancellation, leaks, or backpressure. |
-| `references/io-and-syscalls.md` | Buffering, batching, stream copies, framing, files, mmap, databases, or RPC boundaries. |
-| `references/encoding-and-text.md` | Working on JSON/binary encoding, formatting, regexps, hashing, crypto, or compression. |
-| `references/networking.md` | Tuning HTTP clients/servers, TLS, DNS, sockets, long-lived connections, or network observability. |
-| `references/protocols.md` | Selecting raw TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3, gRPC, or QUIC. |
-| `references/scaling-and-resilience.md` | Handling overload, circuit breaking, shedding, retry storms, graceful degradation, or very high connection counts. |
-| `references/measurement.md` | Benchmarking, profiling, tracing, load testing, or making any performance claim. |
-| `references/compiler.md` | Inspecting compiler decisions, BCE, inlining, PGO, build flags, cgo, experiments, or disassembly. |
-| `references/toolchain-upgrades.md` | Comparing Go releases, platforms, or regression risk during a toolchain upgrade. |
+**Measure** — `references/writing-benchmarks.md` writing one you can trust · `references/comparing-benchmarks.md` benchstat, repeats, variance · `references/pprof.md` CPU and memory profiles · `references/block-profiles.md` blocking, mutex, traces · `references/load-testing.md` open-loop, coordinated omission · `references/workflow.md` baseline improvements, intensity levels.
 
-The core skill is self-contained. Companion skills such as
-`$go-turbo-analyze`, `$go-turbo-improve`, `$go-turbo-bench`,
-`$go-turbo-review`, `$go-turbo-audit`, and `$go-turbo-escape` provide focused
-workflows when installed, but the core workflow must not depend on them.
+**Allocate** — `references/finding-allocations.md` locating the site · `references/presizing.md` capacity from a bound, and when presizing backfires · `references/interface-boxing.md` conversion vs allocation · `references/pooling.md` sync.Pool · `references/retention.md` sub-slice holding a big array · `references/strings-and-bytes.md` string/[]byte round trips, building · `references/memory-layout.md` padding, false sharing, aliasing.
 
-Version-specific examples describe their minimum version where it matters.
-When the repository targets an older Go release, select the documented fallback
-and verify it with that exact toolchain.
+**Escapes** — `references/escape-analysis.md` reading -gcflags=-m · `references/escape-causes.md` the shapes that escape · `references/necessary-escapes.md` when to leave it · `references/caller-owned-buffers.md` AppendX, reusable storage · `references/value-semantics.md` values, stack scratch · `references/hot-dispatch.md` concrete types, inlining coupling.
+
+**Choose a structure** — `references/choosing-structures.md` from the workload · `references/map-vs-slice.md` the crossover · `references/pointer-density.md` GC cost of layout · `references/sorting.md` sort once, query many · `references/heaps.md` priority queues · `references/monotonic-stacks.md` nested scans in one pass · `references/in-place-transforms.md` filter and compact in place · `references/queues-and-rings.md` bounded queues, rings.
+
+**Run** — `references/gc-cost.md` what the collector spends · `references/gc-tuning.md` GOGC, GOMEMLIMIT · `references/gc-diagnosis.md` gctrace, heap, metrics · `references/object-lifetime.md` weak pointers, cleanups · `references/gomaxprocs.md` CPU quota · `references/scheduler-state.md` G-M-P pressure · `references/goroutine-budgets.md` budget by retained state · `references/netpoll.md` the event loop you already have.
+
+**Compile** — `references/compiler-diagnostics.md` build context, reading decisions · `references/inlining.md` cost model, devirtualization · `references/bounds-check-elimination.md` BCE · `references/pgo.md` profile-guided optimization · `references/build-flags.md` release and target flags · `references/cgo.md` call cost, static linking · `references/build-experiments.md` GOEXPERIMENT, assembly, SIMD.
+
+**Upgrade the toolchain** — `references/upgrade-experiment.md` support status, then the contract · `references/benchmark-inputs.md` deterministic, warm and cold · `references/same-host-comparison.md` one machine, interleaved · `references/sample-variance.md` how many samples · `references/run-metadata.md` what makes it reproducible · `references/interpreting-results.md` canary and rollback.
+
+**Coordinate** — `references/bounding-concurrency.md` fan-out, choosing the bound · `references/backpressure.md` signalling the producer · `references/mutexes-and-atomics.md` cheapest coordination · `references/sharding.md` splitting a contended lock · `references/immutable-snapshots.md` publish, lazy init · `references/channels.md` value ownership · `references/context-cancellation.md` propagating cancellation · `references/graceful-shutdown.md` signals, drain order · `references/goroutine-leaks.md` lifetime and exit paths.
+
+**Cross a boundary** — `references/buffering.md` repeated small I/O · `references/batching.md` grouping without holding locks · `references/stream-copies.md` io.Copy fast paths · `references/framing.md` bounded length prefixes · `references/files-and-mmap.md` file APIs, memory mapping.
+
+**Encode** — `references/json.md` typed and streaming · `references/binary-encoding.md` wire formats, append-oriented · `references/base64.md` exact output sizing · `references/text-processing.md` number formatting, regexps · `references/hashing.md` checksums, streaming hashers · `references/aead-nonces.md` nonce reuse is a security bug · `references/compression.md` codec choice, reuse, bounds.
+
+**Talk to the network** — `references/http-connection-reuse.md` the usual cause · `references/http-client-config.md` transport sharing · `references/httptrace.md` was it reused · `references/request-deadlines.md` timeouts, retry budgets · `references/http-servers.md` server timeouts, release · `references/http2-tuning.md` streams, flow control · `references/tls.md` handshake, resumption · `references/dns.md` resolution, caching · `references/protocol-selection.md` which protocol · `references/http-versions.md` 1.1 vs 2 vs 3 · `references/grpc.md` unary and streaming · `references/tcp-framing.md` raw TCP · `references/udp.md` datagrams · `references/quic.md` streams, migration · `references/socket-options.md` kernel buffers, setsockopt · `references/connection-scale.md` 10k+ connections, accept loops.
+
+**Survive load** — `references/resource-budgets.md` what the process has · `references/admission-control.md` what to accept · `references/rate-limiting.md` limiter algorithms · `references/bounded-queues.md` sizing and full policy · `references/load-shedding.md` shedding, 503s · `references/circuit-breakers.md` stop paying for failure · `references/retries.md` idempotency, budgets, jitter.
+
+Version-specific examples name their minimum version where it matters. On an
+older Go release, take the documented fallback and verify it with that exact
+toolchain.
 
 Fast is a property you measure, not a style you adopt.
