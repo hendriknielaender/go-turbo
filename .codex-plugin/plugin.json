@@ -1,6 +1,6 @@
 {
   "name": "go-turbo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Evidence-driven Go performance engineering for implementation, review, diagnosis, benchmarking, profiling, networking, and production scaling.",
   "author": {
     "name": "Hendrik Nielaender",

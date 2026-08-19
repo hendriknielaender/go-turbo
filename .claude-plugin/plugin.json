@@ -1,6 +1,6 @@
 {
   "name": "go-turbo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Go performance mode. Writes and reviews Go like a staff performance engineer: idiomatic first, allocation-aware always, micro-optimized only where a measurement says it matters.",
   "author": {
     "name": "Hendrik Nielaender",
