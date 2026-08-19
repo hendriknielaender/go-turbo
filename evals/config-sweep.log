@@ -1,0 +1,13 @@
+12 runs pending (1 tasks x 2 models x 2 arms x 3 repeats, 4 cells), 4 at a time
+[1/12] ok  config-startup__sonnet-high__plain__r3 $0.409 500,221tok 133s
+[2/12] ok  config-startup__sonnet-high__plain__r2 $0.500 416,677tok 154s
+[3/12] ok  config-startup__sonnet-high__plain__r1 $0.668 783,573tok 246s
+[4/12] ok  config-startup__sonnet-high__skill__r1 $0.850 1,018,393tok 294s
+[5/12] ok  config-startup__opus-medium__plain__r1 $0.512 238,669tok 87s
+[6/12] ok  config-startup__opus-medium__plain__r2 $0.282 132,621tok 92s
+[7/12] ok  config-startup__sonnet-high__skill__r3 $0.582 527,179tok 235s
+[8/12] ok  config-startup__opus-medium__plain__r3 $0.236 109,051tok 60s
+[9/12] ok  config-startup__opus-medium__skill__r1 $0.400 228,098tok 98s
+[10/12] ok  config-startup__opus-medium__skill__r2 $0.375 168,991tok 116s
+[11/12] ok  config-startup__opus-medium__skill__r3 $0.474 284,723tok 2017s
+[12/12] ok  config-startup__sonnet-high__skill__r2 $0.852 1,057,149tok 3867s

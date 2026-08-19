@@ -1,0 +1,7 @@
+6 runs pending (1 tasks x 2 models x 1 arms x 3 repeats, 2 cells), 4 at a time
+[1/6] ok  dedup-implement__sonnet-high__skill__r1 $0.311 335,378tok 104s
+[2/6] ok  dedup-implement__sonnet-high__skill__r3 $0.340 350,371tok 114s
+[3/6] ok  dedup-implement__sonnet-high__skill__r2 $0.351 347,316tok 116s
+[4/6] ok  dedup-implement__opus-medium__skill__r3 $1.088 963,422tok 267s
+[5/6] ok  dedup-implement__opus-medium__skill__r1 $0.804 635,393tok 542s
+[6/6] ok  dedup-implement__opus-medium__skill__r2 $0.937 735,845tok 910s

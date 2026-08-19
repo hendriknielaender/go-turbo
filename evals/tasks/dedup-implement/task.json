@@ -1,0 +1,17 @@
+{
+  "summary": "Implement stable uint64 deduplication with a wide input range and no supplied profile.",
+  "probes": [
+    "chooses a complexity class that survives the 1M backfill",
+    "preserves nil-in/nil-out",
+    "does not mutate the caller's slice",
+    "does not invent evidence for an unmeasured claim"
+  ],
+  "grader": {
+    "kind": "script",
+    "script": "grade.sh",
+    "timeout_seconds": 600
+  },
+  "exclusive": false,
+  "timeout_seconds": 1800,
+  "provenance": "Fixture written for this suite. Not derived from any public benchmark, issue tracker, or repository."
+}

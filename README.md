@@ -82,26 +82,35 @@ Claude Code can install the repository as a plugin:
 /plugin install go-turbo
 ```
 
-The `commands/` directory supplies Claude slash-command adapters. Agents that
-read repository instructions can use `AGENTS.md`; Cursor can use
+Every skill is its own slash command — `/go-turbo`, `/go-turbo-analyze`, and so
+on. Agents that read repository instructions can use `AGENTS.md`; Cursor can use
 `.cursor/rules/go-turbo.mdc`.
 
 ## Workflows
 
+Skills split on one axis: who can reach them.
+
+**Model-invoked** — the agent selects it, or you type it.
+
 | Skill | Purpose |
 | --- | --- |
-| `$go-turbo` | Implement, refactor, debug, design, or review performant idiomatic Go. |
-| `$go-turbo-analyze` | Diagnose a latency, CPU, memory, throughput, or scaling problem without editing code. |
-| `$go-turbo-improve` | Apply a measured performance fix and verify behavior and effect. |
-| `$go-turbo-escape` | Explain and reduce heap escapes that matter on the real path. |
-| `$go-turbo-bench` | Create, run, and interpret representative Go benchmarks. |
-| `$go-turbo-review` | Review a diff for actionable performance regressions and premature complexity. |
-| `$go-turbo-audit` | Produce a ranked whole-repository performance assessment. |
-| `$go-turbo-help` | Show the workflow and evidence reference card. |
+| [`$go-turbo`](docs/go-turbo.md) | Implement, refactor, debug, design, or review performant idiomatic Go. |
 
-The focused skills are optional, explicit workflows. Their Codex metadata
-disables implicit invocation, so only the primary skill can be selected
-automatically and the triggers do not overlap.
+**User-invoked** — reachable only by typing the name. The agent will never fire
+these on its own, and no skill can call another, so triggers cannot overlap.
+
+| Skill | Purpose |
+| --- | --- |
+| [`$go-turbo-analyze`](docs/go-turbo-analyze.md) | Diagnose a latency, CPU, memory, throughput, or scaling problem without editing code. |
+| [`$go-turbo-improve`](docs/go-turbo-improve.md) | Apply a measured performance fix and verify behavior and effect. |
+| [`$go-turbo-escape`](docs/go-turbo-escape.md) | Explain and reduce heap escapes that matter on the real path. |
+| [`$go-turbo-bench`](docs/go-turbo-bench.md) | Create, run, and interpret representative Go benchmarks. |
+| [`$go-turbo-review`](docs/go-turbo-review.md) | Review a diff for actionable performance regressions and premature complexity. |
+| [`$go-turbo-audit`](docs/go-turbo-audit.md) | Produce a ranked whole-repository performance assessment. |
+| [`$go-turbo-help`](docs/go-turbo-help.md) | Show the index of these workflows and the intensity levels. |
+
+Each is its own slash command — `/go-turbo-analyze` and so on. `$go-turbo-help`
+is the router when you are unsure which one fits.
 
 ## Performance ladder
 
@@ -128,19 +137,110 @@ a removal trigger.
 
 | Reference | Covers |
 | --- | --- |
-| `data-structures.md` | Cost models, small collections, maps, sorting, heaps, rings, queues, indexes, and memory-oriented layouts. |
-| `allocation.md` | Slices, maps, builders, boxing, pools, layout, aliasing, string/byte conversions, and retention. |
-| `escape-analysis.md` | Compiler diagnostics, lifetime causes, stack-friendly API shapes, closures, interfaces, and inlining nuance. |
-| `gc-and-runtime.md` | GC pacing and limits, managed memory, stacks, scheduler behavior, netpoll, and runtime observability. |
-| `concurrency.md` | Bounded work, synchronization choices, sharding, immutable publication, cancellation, leaks, and backpressure. |
-| `io-and-syscalls.md` | Buffering, batching, copies, framing, file access, mmap, databases, RPCs, flush, and error contracts. |
-| `encoding-and-text.md` | Binary and JSON encoding, formatting, regexps, parsing, hashing, crypto, and compression choices. |
-| `networking.md` | HTTP clients and servers, connection reuse, TLS, DNS, socket controls, long-lived connections, and observability. |
-| `protocols.md` | TCP, UDP, HTTP/1.1, HTTP/2, HTTP/3, gRPC, QUIC, multiplexing, flow control, and replay-safe early data. |
-| `scaling-and-resilience.md` | Admission control, overload, circuit breaking, shedding, retries, degradation, graceful shutdown, and high connection counts. |
-| `measurement.md` | Benchmark construction, benchstat, profiles, traces, load tests, variance, and claim boundaries. |
-| `compiler.md` | Diagnostics, inlining, devirtualization, bounds checks, PGO, flags, cgo, experiments, and disassembly. |
-| `toolchain-upgrades.md` | Release-to-release benchmarking, compatibility, rollout, regression isolation, and rollback evidence. |
+| **Measure** | |
+| `writing-benchmarks.md` | Writing one you can trust. |
+| `comparing-benchmarks.md` | Benchstat, repeats, variance. |
+| `pprof.md` | CPU and memory profiles. |
+| `block-profiles.md` | Blocking, mutex, traces. |
+| `load-testing.md` | Open-loop, coordinated omission. |
+| `workflow.md` | Baseline improvements, intensity levels. |
+| **Allocate** | |
+| `finding-allocations.md` | Locating the site. |
+| `presizing.md` | Capacity from a bound. |
+| `interface-boxing.md` | Conversion vs allocation. |
+| `pooling.md` | Sync. |
+| `retention.md` | Sub-slice holding a big array. |
+| `strings-and-bytes.md` | String/[]byte round trips, building. |
+| `memory-layout.md` | Padding, false sharing, aliasing. |
+| **Escapes** | |
+| `escape-analysis.md` | Reading -gcflags=-m. |
+| `escape-causes.md` | The shapes that escape. |
+| `necessary-escapes.md` | When to leave it. |
+| `caller-owned-buffers.md` | AppendX, reusable storage. |
+| `value-semantics.md` | Values, stack scratch. |
+| `hot-dispatch.md` | Concrete types, inlining coupling. |
+| **Choose a structure** | |
+| `choosing-structures.md` | From the workload. |
+| `map-vs-slice.md` | The crossover. |
+| `pointer-density.md` | GC cost of layout. |
+| `sorting.md` | Sort once, query many. |
+| `heaps.md` | Priority queues. |
+| `monotonic-stacks.md` | Nested scans in one pass. |
+| `in-place-transforms.md` | Filter and compact in place. |
+| `queues-and-rings.md` | Bounded queues, rings. |
+| **Run** | |
+| `gc-cost.md` | What the collector spends. |
+| `gc-tuning.md` | GOGC, GOMEMLIMIT. |
+| `gc-diagnosis.md` | Gctrace, heap, metrics. |
+| `object-lifetime.md` | Weak pointers, cleanups. |
+| `gomaxprocs.md` | CPU quota. |
+| `scheduler-state.md` | G-M-P pressure. |
+| `goroutine-budgets.md` | Budget by retained state. |
+| `netpoll.md` | The event loop you already have. |
+| **Compile** | |
+| `compiler-diagnostics.md` | Build context, reading decisions. |
+| `inlining.md` | Cost model, devirtualization. |
+| `bounds-check-elimination.md` | BCE. |
+| `pgo.md` | Profile-guided optimization. |
+| `build-flags.md` | Release and target flags. |
+| `cgo.md` | Call cost, static linking. |
+| `build-experiments.md` | GOEXPERIMENT, assembly, SIMD. |
+| **Upgrade the toolchain** | |
+| `upgrade-experiment.md` | The contract. |
+| `benchmark-inputs.md` | Deterministic, warm and cold. |
+| `same-host-comparison.md` | One machine, interleaved. |
+| `sample-variance.md` | How many samples. |
+| `run-metadata.md` | What makes it reproducible. |
+| `interpreting-results.md` | Canary and rollback. |
+| **Coordinate** | |
+| `bounding-concurrency.md` | Fan-out, choosing the bound. |
+| `backpressure.md` | Signalling the producer. |
+| `mutexes-and-atomics.md` | Cheapest coordination. |
+| `sharding.md` | Splitting a contended lock. |
+| `immutable-snapshots.md` | Publish, lazy init. |
+| `channels.md` | Value ownership. |
+| `context-cancellation.md` | Propagating cancellation. |
+| `graceful-shutdown.md` | Signals, drain order. |
+| `goroutine-leaks.md` | Lifetime and exit paths. |
+| **Cross a boundary** | |
+| `buffering.md` | Repeated small I/O. |
+| `batching.md` | Grouping without holding locks. |
+| `stream-copies.md` | Io. |
+| `framing.md` | Bounded length prefixes. |
+| `files-and-mmap.md` | File APIs, memory mapping. |
+| **Encode** | |
+| `json.md` | Typed and streaming. |
+| `binary-encoding.md` | Wire formats, append-oriented. |
+| `base64.md` | Exact output sizing. |
+| `text-processing.md` | Number formatting, regexps. |
+| `hashing.md` | Checksums, streaming hashers. |
+| `aead-nonces.md` | Nonce reuse is a security bug. |
+| `compression.md` | Codec choice, reuse, bounds. |
+| **Talk to the network** | |
+| `http-connection-reuse.md` | The usual cause. |
+| `http-client-config.md` | Transport sharing. |
+| `httptrace.md` | Was it reused. |
+| `request-deadlines.md` | Timeouts, retry budgets. |
+| `http-servers.md` | Server timeouts, release. |
+| `http2-tuning.md` | Streams, flow control. |
+| `tls.md` | Handshake, resumption. |
+| `dns.md` | Resolution, caching. |
+| `protocol-selection.md` | Which protocol. |
+| `http-versions.md` | 1. |
+| `grpc.md` | Unary and streaming. |
+| `tcp-framing.md` | Raw TCP. |
+| `udp.md` | Datagrams. |
+| `quic.md` | Streams, migration. |
+| `socket-options.md` | Kernel buffers, setsockopt. |
+| `connection-scale.md` | 10k+ connections, accept loops. |
+| **Survive load** | |
+| `resource-budgets.md` | What the process has. |
+| `admission-control.md` | What to accept. |
+| `rate-limiting.md` | Limiter algorithms. |
+| `bounded-queues.md` | Sizing and full policy. |
+| `load-shedding.md` | Shedding, 503s. |
+| `circuit-breakers.md` | Stop paying for failure. |
+| `retries.md` | Idempotency, budgets, jitter. |
 
 The Go examples are syntax-checked with the Go toolchain used by validation;
 that does not type-check every API or prove runtime behavior. Version-specific
@@ -159,9 +259,11 @@ go-turbo/
 ├── .claude-plugin/                   Claude plugin manifests
 ├── .github/workflows/                validation and release automation
 ├── AGENTS.md                         portable minimum rules
+├── CLAUDE.md                         repo conventions for agents editing it
+├── docs/                             one human-facing page per skill
+├── .agents/                          invocation, reference and docs doctrine
 ├── assets/                           Codex plugin brand assets
 ├── CHANGELOG.md                      released user-visible changes
-├── commands/                         Claude command adapters
 ├── package.json                      single version authority
 ├── skills/
 │   ├── go-turbo/

@@ -1,0 +1,17 @@
+{
+  "summary": "A cold, once-per-process startup path with a vague 'make it faster'. Tests what the agent reaches for when nobody tells it what to do.",
+  "probes": [
+    "measures before concluding, rather than pattern-matching on code shape",
+    "reasons from once-per-process to rule out pooling, amortization, and GC tuning",
+    "notices its own measurement is 30x below the reported host figure",
+    "does not reach for sync.Pool, unsafe, or GOGC unprompted"
+  ],
+  "grader": {
+    "kind": "judge",
+    "rubric": "rubric.md"
+  },
+  "exclusive": false,
+  "timeout_seconds": 1800,
+  "provenance": "Fixture written for this suite. The prompt deliberately names no optimization: an earlier version listed five specific changes to reject, which leaked the answer and let an agent score by walking a supplied list instead of finding the problem itself.",
+  "design_note": "The temptations here are unprompted. Nothing in the prompt suggests pooling, unsafe, pointer conversion, field reordering, or GC knobs; the penalties fire only if the agent introduces them on its own. That makes this a test of what the agent does with an open-ended 'make it faster' on a path where almost nothing is worth doing."
+}

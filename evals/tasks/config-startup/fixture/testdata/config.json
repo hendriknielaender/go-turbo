@@ -1,0 +1,29 @@
+{
+  "listen_addr": "0.0.0.0:8443",
+  "database_url": "postgres://svc:secret@db.internal:5432/app?sslmode=require",
+  "region": "US-EAST-1",
+  "feature_flags": {
+    "NewCheckout": true,
+    "DarkMode": false,
+    "BetaSearch": true,
+    "LegacyExport": false,
+    "InlineHelp": true,
+    "FastPath": true,
+    "AuditLogV2": false,
+    "RateLimitV3": true
+  },
+  "upstreams": [
+    { "name": "billing", "base_url": "https://billing.internal/", "weight": 5 },
+    { "name": "catalog", "base_url": "https://catalog.internal/", "weight": 3 },
+    { "name": "search", "base_url": "https://search.internal/", "weight": 2 },
+    { "name": "notifications", "base_url": "https://notify.internal/", "weight": 1 },
+    { "name": "auth", "base_url": "https://auth.internal/", "weight": 4 },
+    { "name": "ledger", "base_url": "https://ledger.internal/", "weight": 6 }
+  ],
+  "env": {
+    "APP_ENV": "production",
+    "LOG_LEVEL": "info",
+    "TRACING_ENABLED": "true",
+    "REGION_OVERRIDE": "us-east-1"
+  }
+}
