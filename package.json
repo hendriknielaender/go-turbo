@@ -1,6 +1,6 @@
 {
   "name": "go-turbo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Evidence-driven Go performance engineering skills for coding agents",
   "repository": {
